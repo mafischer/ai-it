@@ -1,0 +1,8 @@
+# NodeJS dependencies
+node_modules
+
+# check points
+checkpoints.db*
+
+# logs
+*.log
