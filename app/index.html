@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>AI-IT Admin</title>
+  <title>AI-IT</title>
   <link href="https://cdn.jsdelivr.net/npm/vuetify@3.7.6/dist/vuetify.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css" rel="stylesheet">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -12,6 +12,8 @@
 <script src="https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vue-router@4.5.0/dist/vue-router.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/vuetify@3.7.6/dist/vuetify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+<script src="chat.js"></script>
 
 <script>
 const { createApp, ref, computed, onMounted, onUnmounted, watch } = Vue;
@@ -47,7 +49,7 @@ const ThreadList = {
   template: `
     <v-container fluid>
       <div class="d-flex align-center mb-6">
-        <v-icon size="32" color="primary" class="mr-3">mdi-brain</v-icon>
+        <v-icon size="32" color="primary" class="mr-3" style="cursor:pointer" @click="$router.push('/')">mdi-brain</v-icon>
         <h1 class="text-h4 font-weight-bold">AI-IT Conversations</h1>
         <v-spacer />
         <v-btn color="error" variant="outlined" prepend-icon="mdi-delete-sweep" @click="deleteAll" :disabled="!threads.length">
@@ -63,7 +65,7 @@ const ThreadList = {
       </v-card>
 
       <div v-for="t in threads" :key="t.thread_id" class="d-flex align-center ga-3 mb-3">
-        <v-card class="flex-grow-1" :border="isActive(t.thread_id) ? 'primary md' : ''" elevation="3" hover @click="$router.push('/thread/' + t.thread_id)">
+        <v-card class="flex-grow-1" :border="isActive(t.thread_id) ? 'primary md' : ''" elevation="3" hover @click="$router.push('/admin/thread/' + t.thread_id)">
           <v-card-text>
             <div class="d-flex align-center">
               <code class="text-caption text-medium-emphasis mr-3">{{ t.thread_id }}</code>
@@ -89,7 +91,7 @@ const ThreadList = {
 
     async function fetchData() {
       try {
-        const [tr, ar] = await Promise.all([fetch("/admin/api/threads"), fetch("/admin/api/active")]);
+        const [tr, ar] = await Promise.all([fetch("/api/threads"), fetch("/api/active")]);
         threads.value = await tr.json();
         activeIds.value = (await ar.json()).map(i => i.thread_id);
       } catch {} finally { loading.value = false; }
@@ -100,13 +102,13 @@ const ThreadList = {
 
     async function deleteThread(tid) {
       if (!confirm("Delete this conversation?")) return;
-      await fetch("/admin/api/threads/" + tid, { method: "DELETE" });
+      await fetch("/api/threads/" + tid, { method: "DELETE" });
       fetchData();
     }
 
     async function deleteAll() {
       if (!confirm("Delete ALL conversations?")) return;
-      await fetch("/admin/api/threads", { method: "DELETE" });
+      await fetch("/api/threads", { method: "DELETE" });
       fetchData();
     }
 
@@ -121,7 +123,7 @@ const ThreadList = {
 const ThreadDetail = {
   template: `
     <v-container fluid>
-      <v-btn variant="text" prepend-icon="mdi-arrow-left" @click="$router.push('/')" class="mb-3">All Conversations</v-btn>
+      <v-btn variant="text" prepend-icon="mdi-arrow-left" @click="$router.push('/admin')" class="mb-3">All Conversations</v-btn>
 
       <div class="d-flex align-center mb-4">
         <h1 class="text-h5 font-weight-bold">Thread {{ threadId }}</h1>
@@ -179,14 +181,14 @@ const ThreadDetail = {
 
     async function fetchMessages() {
       try {
-        const r = await fetch("/admin/api/threads/" + threadId + "/messages");
+        const r = await fetch("/api/threads/" + threadId + "/messages");
         if (r.ok) messages.value = await r.json();
       } catch {} finally { loading.value = false; }
     }
 
     async function fetchActive() {
       try {
-        const r = await fetch("/admin/api/active");
+        const r = await fetch("/api/active");
         const items = await r.json();
         const entry = items.find(i => i.thread_id === threadId);
         active.value = !!entry;
@@ -202,7 +204,7 @@ const ThreadDetail = {
 
     async function rewind(i) {
       if (!confirm("Rewind to message " + i + " and re-run?")) return;
-      const r = await fetch("/admin/api/threads/" + threadId + "/rewind", {
+      const r = await fetch("/api/threads/" + threadId + "/rewind", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messageIndex: i })
       });
@@ -213,7 +215,7 @@ const ThreadDetail = {
 
     async function abortThread() {
       if (!confirm("Abort active workflow?")) return;
-      const r = await fetch("/admin/api/threads/" + threadId + "/abort", { method: "POST" });
+      const r = await fetch("/api/threads/" + threadId + "/abort", { method: "POST" });
       const d = await r.json();
       alert(d.message || d.error);
       pollAll();
@@ -230,8 +232,9 @@ const ThreadDetail = {
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: "/", component: ThreadList },
-    { path: "/thread/:id", component: ThreadDetail },
+    { path: "/", component: window.ChatView },
+    { path: "/admin", component: ThreadList },
+    { path: "/admin/thread/:id", component: ThreadDetail },
   ]
 });
 
@@ -261,14 +264,44 @@ app.mount("#app");
 </script>
 
 <style>
-.msg-content {
+.msg-content, .msg-text {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 0.875rem;
   line-height: 1.6;
-  max-height: 400px;
-  overflow-y: auto;
+  margin: 0;
+}
+.cursor-pointer { cursor: pointer; }
+
+/* Markdown rendered content */
+.md-content { font-size: 0.9rem; line-height: 1.7; word-break: break-word; }
+.md-content p { margin-bottom: 0.75em; }
+.md-content p:last-child { margin-bottom: 0; }
+.md-content h1, .md-content h2, .md-content h3, .md-content h4 { margin: 1em 0 0.5em; font-weight: 600; color: #cdd6f4; }
+.md-content h1 { font-size: 1.4rem; }
+.md-content h2 { font-size: 1.2rem; }
+.md-content h3 { font-size: 1.05rem; }
+.md-content h4 { font-size: 0.95rem; }
+.md-content ul, .md-content ol { margin: 0.5em 0; padding-left: 1.5em; }
+.md-content li { margin-bottom: 0.3em; }
+.md-content code { background: #313244; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.85em; }
+.md-content pre { background: #181825; border: 1px solid #313244; border-radius: 8px; padding: 1em; overflow-x: auto; margin: 0.75em 0; }
+.md-content pre code { background: none; padding: 0; font-size: 0.85em; }
+.md-content blockquote { border-left: 3px solid #58a6ff; padding: 0.5em 1em; margin: 0.75em 0; color: #a6adc8; }
+.md-content table { border-collapse: collapse; margin: 0.75em 0; width: 100%; }
+.md-content th, .md-content td { border: 1px solid #313244; padding: 0.4em 0.75em; text-align: left; }
+.md-content th { background: #1e1e2e; font-weight: 600; }
+.md-content hr { border: none; border-top: 1px solid #313244; margin: 1em 0; }
+.md-content a { color: #58a6ff; }
+.md-content strong { color: #cdd6f4; }
+
+/* Hide all scrollbars but keep scrolling */
+*, *::before, *::after {
+  scrollbar-width: none !important;
+}
+*::-webkit-scrollbar {
+  display: none !important;
 }
 </style>
 </body>

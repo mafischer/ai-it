@@ -3,365 +3,58 @@
 
 🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
 🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete
 [LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
 [LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
 
 🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
 🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete
 [LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
 [LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
 
 🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
 🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for user
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete
 [LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
 [LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
 
 🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
 🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete
 [LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
 [LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
 
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[ROUTER]: Fallback invoked for user
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for user
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[35m🔧 DEBUG MODE ACTIVE: All inference responses will be logged.[0m
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for user
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for business_analyst
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for user
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for user
-[ROUTER]: Fallback invoked for user
-[ROUTER]: Fallback invoked for user
-[ROUTER]: Fallback invoked for user
-[ROUTER]: Fallback invoked for business_analyst
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for user
-[ROUTER]: Fallback invoked for business_analyst
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LIFECYCLE] vllm-mlx is responsive, no stale connections detected
-[LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
-[LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
-
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LIFECYCLE] vllm-mlx is responsive, no stale connections detected
+🚀 AI-IT API running at http://localhost:3000
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete
 [LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
 [LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
 
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LIFECYCLE] vllm-mlx is responsive, no stale connections detected
+🚀 AI-IT API running at http://localhost:3000
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete
 [LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
 [LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
 
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[LIFECYCLE] vllm-mlx is responsive, no stale connections detected
+🚀 AI-IT API running at http://localhost:3000
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete
 [LLM]: Creating model "qwen3.5-27b" at http://127.0.0.1:8081/v1
 [LLM]: Creating model "lfm2-8b" at http://10.3.0.241:8080/v1
 
-🚀 AI-IT OpenAI-Compatible API running at http://localhost:3000
-🔗 OpenAI Base URL for Open WebUI: http://localhost:3000/v1
-[ROUTER]: Fallback invoked for ux_designer
+🚀 AI-IT API running at http://localhost:3000
+[LIFECYCLE] vllm-mlx is responsive
+[CONFIG] Engine "llama-server": discovered capabilities [text]
+[LIFECYCLE] Engine discovery complete

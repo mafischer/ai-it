@@ -1,5 +1,6 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { setGlobalDispatcher, Agent } from "undici";
+import { getConfig } from "../config/loader.js";
 
 // Disable native fetch timeouts for long-running local LLM inferences
 setGlobalDispatcher(new Agent({
@@ -8,49 +9,55 @@ setGlobalDispatcher(new Agent({
 }));
 
 /**
- * Helper to resolve runtime configuration from environment variables.
+ * Resolve engine URL and API key for a model key from workflow.json.
+ * Falls back to env vars and hardcoded defaults for backward compatibility.
  */
-export function getRuntimeConfig(modelId) {
-  const envPrefix = modelId.toUpperCase().replace(/[:\.-]/g, "_");
-  
-  const defaults = {
-      "LFM2_8B": "http://10.3.0.241:8080/v1",
-      "QWEN3_5_27B": "http://127.0.0.1:8081/v1"
-  };
+function resolveEngine(modelKey) {
+  const cfg = getConfig();
+  const model = cfg.models?.[modelKey];
+  const engine = model?.engine ? cfg.engines?.[model.engine] : null;
 
+  if (engine) {
+    return {
+      baseURL: engine.url,
+      apiKey: engine.apiKey || "not-needed",
+      modelId: model.modelId || modelKey,
+      capabilities: engine.capabilities || [],
+    };
+  }
+
+  // Legacy fallback: resolve from env vars
+  const modelId = model?.modelId || modelKey;
+  const envPrefix = modelId.toUpperCase().replace(/[:\.-]/g, "_");
   return {
-    baseURL: process.env[`${envPrefix}_URL`] || defaults[envPrefix] || "http://localhost:11434/v1",
+    baseURL: process.env[`${envPrefix}_URL`] || "http://localhost:11434/v1",
     apiKey: process.env[`${envPrefix}_KEY`] || "not-needed",
+    modelId,
+    capabilities: model?.capabilities || [],
   };
 }
 
 /**
- * Factory to create a ChatOpenAI instance for a specific model node.
+ * Factory to create a ChatOpenAI instance for a model key defined in workflow.json.
  */
-export function createLLM(modelId = "llama3-8b") {
-  const config = getRuntimeConfig(modelId);
-  console.log(`[LLM]: Creating model "${modelId}" at ${config.baseURL}`);
-  
+export function createLLM(modelKey) {
+  const engine = resolveEngine(modelKey);
+  console.log(`[LLM]: Creating model "${engine.modelId}" at ${engine.baseURL}`);
+
   const options = {
-    apiKey: config.apiKey || "sk-no-key",
+    apiKey: engine.apiKey || "sk-no-key",
     configuration: {
-      baseURL: config.baseURL,
+      baseURL: engine.baseURL,
     },
-    modelName: modelId,
+    modelName: engine.modelId,
     temperature: 0,
     streaming: true,
-    maxRetries: 0, 
+    maxRetries: 0,
     maxTokens: 32768,
   };
 
-  // Explicit JSON mode for strict schema models
-  const useStrictJson = modelId.toLowerCase().includes("qwen2.5-7b");
-  if (useStrictJson) {
-      options.modelKwargs = { response_format: { type: "json_object" } };
-  }
-
-  // Pass thinking budget for Qwen3 models (enforced in vllm-mlx's MLXLanguageModel)
-  if (modelId.toLowerCase().includes("qwen3.5-27b")) {
+  // Pass thinking budget if engine supports reasoning
+  if (engine.capabilities.includes("reasoning")) {
       const thinkingBudget = parseInt(process.env.THINKING_BUDGET ?? "2048", 10);
       options.modelKwargs = {
           ...options.modelKwargs,

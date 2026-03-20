@@ -1,16 +1,29 @@
 import { StateGraph, MessagesAnnotation, Annotation, START, END } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { createLLM } from "./src/utils/llm.js";
-import { roles } from "./src/agents/roles.js";
+import { readFileSync, existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { getConfig, getActiveAgents, getRouting, getPipeline, getRouterConfig, initConfig } from "./src/config/loader.js";
+import { renderPrompt } from "./src/config/templates.js";
+import { resolveTarget } from "./src/config/routing.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const checkpointer = SqliteSaver.fromConnString("./checkpoints.db");
+const config = getConfig();
 
 const GraphState = Annotation.Root({
   ...MessagesAnnotation.spec
 });
 
-const qwenLLM = createLLM("qwen3.5-27b");
-const routerLLM = createLLM("lfm2-8b");
+// Create LLMs from config (keyed by model key, not model ID)
+const llms = {};
+for (const key of Object.keys(config.models)) {
+    llms[key] = createLLM(key);
+}
+
+const routerLLM = llms[config.router.model];
 
 function extractStatus(content) {
     if (!content) return null;
@@ -27,92 +40,112 @@ function getPromptForNode(state, nodeName) {
     const msgs = state.messages.filter(m => m.name === nodeName);
     const lastSelfStatus = msgs.length ? extractStatus(msgs[msgs.length - 1].content) : null;
     const lastMsg = state.messages[state.messages.length - 1];
-    const rolePrompts = roles[nodeName]?.prompts;
-    
-    if (!rolePrompts) return `You are ${nodeName}.`;
+    const agent = config.agents[nodeName];
+
+    const prompts = Array.isArray(agent?.prompts) ? agent.prompts : Object.keys(agent?.prompts || {});
+    if (!prompts.length) return `You are ${nodeName}.`;
+    const hasPrompt = (v) => prompts.includes(v);
 
     const selfLastContent = msgs.length ? msgs[msgs.length - 1].content : "";
     const otherLastContent = lastMsg ? lastMsg.content : "";
-
     const isContinue = lastSelfStatus && lastSelfStatus.includes("_PHASE_CONTINUE");
 
-    // If user is replying to this agent's questions, capture those questions
     const isUserReply = lastMsg.role === "user" || lastMsg.role === "human";
     let priorQuestions = "";
     if (isUserReply && msgs.length) {
         const lastSelf = msgs[msgs.length - 1];
         const selfStatus = extractStatus(lastSelf.content);
-        if (selfStatus === "DIRECTIVE_AMBIGUOUS" || selfStatus === "QUESTION") {
+        const questionStatuses = getPipeline().question_statuses || [];
+        if (questionStatuses.includes(selfStatus) || selfStatus === "QUESTION") {
             priorQuestions = lastSelf.content;
         }
     }
 
+    // Build values dynamically from state — no hardcoded domain concepts.
+    // Templates can reference:
+    //   {{directive}}          — the original user directive (first message)
+    //   {{upstream}}           — last message content (from whoever spoke before this agent)
+    //   {{self}}               — this agent's own last output (for continue/phase flows)
+    //   {{input}}              — whichever is contextually relevant: self (continue) or upstream
+    //   {{priorQuestions}}     — this agent's last output IF it ended with a question status
+    //   {{userResponse}}       — the user's latest message (if replying)
+    //   {{last.agentName}}     — last output from a specific agent (e.g., {{last.business_analyst}})
+    //   {{lastStatus}}         — the STATUS token from the last message
+    //   {{selfStatus}}         — this agent's own last STATUS token
+    //   {{speaker}}            — name/role of whoever sent the last message
+
+    // Per-agent last outputs: {{last.business_analyst}}, {{last.software_architect}}, etc.
+    const last = {};
+    for (const agentId of getActiveAgents()) {
+        const agentMsgs = state.messages.filter(m => m.name === agentId);
+        last[agentId] = agentMsgs.length ? agentMsgs[agentMsgs.length - 1].content : "";
+    }
+
     const values = {
-        currentDirective: state.messages[0] ? state.messages[0].content : "",
-        currentRequirements: isContinue ? selfLastContent : otherLastContent,
-        currentDesign: isContinue ? selfLastContent : otherLastContent,
-        currentImplementation: isContinue ? selfLastContent : otherLastContent,
-        currentCode: isContinue ? selfLastContent : otherLastContent,
-        currentTestResults: isContinue ? selfLastContent : otherLastContent,
-        currentFeedback: otherLastContent,
+        // Core context
+        directive: state.messages[0] ? state.messages[0].content : "",
+        upstream: otherLastContent,
+        self: selfLastContent,
+        input: isContinue ? selfLastContent : otherLastContent,
+
+        // Interaction
         priorQuestions,
         userResponse: isUserReply ? lastMsg.content : "",
 
-        // Fallbacks just in case roles.js still references old names
-        design: otherLastContent,
-        requirements: otherLastContent,
-        feedback: otherLastContent,
-        testResults: otherLastContent
+        // Per-agent outputs
+        last,
+
+        // Status metadata
+        lastStatus: lastMsg ? (extractStatus(lastMsg.content) || "") : "",
+        selfStatus: lastSelfStatus || "",
+        speaker: lastMsg?.name || lastMsg?.role || "user",
+
     };
 
     // 1. If continuing own phase
-    if (lastSelfStatus && lastSelfStatus.includes("_PHASE_CONTINUE") && rolePrompts.continue) {
-        return rolePrompts.continue(values);
+    if (lastSelfStatus && lastSelfStatus.includes("_PHASE_CONTINUE") && hasPrompt("continue")) {
+        return renderPrompt(nodeName, "continue", values);
     }
 
     const lastMsgStatus = extractStatus(lastMsg.content);
 
-    // 2. If downstream agent sent work back for review/approval
-    let useApproval = false;
-    if (nodeName === "business_analyst" && lastMsgStatus === "DESIGN_COMPLETE") useApproval = true;
-    if ((nodeName === "software_architect" || nodeName === "ux_designer") && lastMsgStatus === "IMPLEMENTATION_COMPLETE") useApproval = true;
-    if ((nodeName === "backend_software_engineer" || nodeName === "frontend_software_engineer") && lastMsgStatus === "REJECTED") useApproval = true;
-
-    if (useApproval && rolePrompts.approval) {
-        return rolePrompts.approval(values);
+    // 2. If downstream agent sent work back for review (approval triggers from config)
+    const routing = getRouting(nodeName);
+    if (routing?.approval_triggers?.includes(lastMsgStatus) && hasPrompt("approval")) {
+        return renderPrompt(nodeName, "approval", values);
     }
 
     // 3. If answering a QUESTION from downstream
     if (lastMsgStatus === "QUESTION") {
-        return rolePrompts.main(values);
+        return renderPrompt(nodeName, "main", values);
     }
 
-    // 4. Otherwise, it's a new task from upstream.
-    // Run 'query' to clarify ambiguities unless we just successfully completed clarification
-    // OR the user is replying to our previous questions (skip straight to main).
-    if (rolePrompts.query) {
-        const isClarified = lastSelfStatus && (lastSelfStatus.endsWith("_CLEAR") || lastSelfStatus.endsWith("_CLARIFIED") || lastSelfStatus.endsWith("_APPROVED"));
+    // 4. Run query to clarify ambiguities unless already clarified or user replied
+    if (hasPrompt("query")) {
+        const isClarified = lastSelfStatus && (lastSelfStatus.endsWith("_CLEAR") || lastSelfStatus.endsWith("_APPROVED"));
         const userRepliedToQuestions = priorQuestions && isUserReply;
         if (!isClarified && !userRepliedToQuestions) {
-            return rolePrompts.query(values);
+            return renderPrompt(nodeName, "query", values);
         }
     }
 
-    // Default to main prompt
-    return rolePrompts.main(values);
+    return renderPrompt(nodeName, "main", values);
 }
 
-async function genericNode(nodeName, state, config) {
+async function genericNode(nodeName, state, nodeConfig) {
     const systemPromptStr = getPromptForNode(state, nodeName);
     const directiveMsg = state.messages[0].content;
     const lastMsg = state.messages[state.messages.length - 1];
+
+    const agentDef = config.agents[nodeName];
+    const llm = llms[agentDef?.model || "specialist"];
 
     const messagesToPass = [
         { role: "system", content: systemPromptStr },
         { role: "user", content: `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${lastMsg.name || lastMsg.role || "USER"}]:\n${lastMsg.content}` }
     ];
 
-    const response = await qwenLLM.invoke(messagesToPass, { signal: config?.signal });
+    const response = await llm.invoke(messagesToPass, { signal: nodeConfig?.signal });
     const content = cleanSpecialistOutput(response.content);
     return { messages: [{ role: "assistant", name: nodeName, content }] };
 }
@@ -129,12 +162,18 @@ async function fallbackRouter(state, currentAgent) {
     const prevStatus = prevMsg ? (extractStatus(prevMsg.content) || "unknown") : "unknown";
     const orchestrationContext = `Previous orchestration: ${prevSpeaker} -> ${prevStatus} -> routed to ${currentAgent}`;
 
-    const systemPrompt = roles.project_manager?.prompts?.main ? roles.project_manager.prompts.main({}) : "You are the router.";
+    const routerCfg = getRouterConfig();
+    let systemPrompt = routerCfg?.systemPrompt || "You are the router.";
+    // Load from template file if it's a path
+    if (systemPrompt.endsWith(".md")) {
+        const filePath = join(__dirname, systemPrompt);
+        if (existsSync(filePath)) systemPrompt = readFileSync(filePath, "utf8");
+    }
     const messagesToPass = [
         { role: "system", content: systemPrompt },
         { role: "user", content: `${orchestrationContext}\nCurrent speaker: ${currentAgent}\n${context}` }
     ];
-    
+
     console.log(`[ROUTER]: Fallback invoked for ${currentAgent}`);
     try {
         const response = await routerLLM.invoke(messagesToPass);
@@ -152,198 +191,61 @@ async function fallbackRouter(state, currentAgent) {
     return [END];
 }
 
-async function routeFromStart(state) {
-    if (!state.messages || state.messages.length === 0) return ["business_analyst"];
+// --- Config-driven routing ---
+function buildRouteFunction(agentId) {
+    const routingDef = getRouting(agentId);
+    if (!routingDef) return (state) => fallbackRouter(state, agentId);
+
+    return (state) => {
+        const msgs = state.messages.filter(m => m.name === agentId);
+        if (!msgs.length) return fallbackRouter(state, agentId);
+        const lastMsg = msgs[msgs.length - 1];
+        const status = extractStatus(lastMsg.content);
+
+        const target = routingDef.routes[status];
+        if (target === undefined) return fallbackRouter(state, agentId);
+
+        return resolveTarget(target, agentId, state);
+    };
+}
+
+function routeFromStart(state) {
+    const pipeline = getPipeline();
+    if (!state.messages || state.messages.length === 0) return [pipeline.entry];
     const lastMsg = state.messages[state.messages.length - 1];
     const isUser = lastMsg && (lastMsg.role === "user" || lastMsg.role === "human");
-    
-    if (state.messages.length === 1) return ["business_analyst"];
+
+    if (state.messages.length === 1) return [pipeline.entry];
 
     if (isUser) {
-        // Was it a reply to a question?
         const msgsBefore = state.messages.slice(0, -1);
         const lastAssistant = msgsBefore.filter(m => m.role === "assistant").pop();
         if (lastAssistant) {
             const status = extractStatus(lastAssistant.content);
-            if (status === "DIRECTIVE_AMBIGUOUS" || status === "QUESTION") {
+            const questionStatuses = pipeline.question_statuses || [];
+            if (questionStatuses.includes(status) || status === "QUESTION") {
                 return [lastAssistant.name];
             }
         }
-        
-        // If it wasn't a reply to a question, it's a new directive or a continuation.
-        // In the new architecture, a new directive from the user should ALWAYS reset the flow to the BA.
-        return ["business_analyst"];
+        return [pipeline.entry];
     }
 
     return fallbackRouter(state, "user");
 }
 
-function routeFromBA(state) {
-    const msgs = state.messages.filter(m => m.name === "business_analyst");
-    if (!msgs.length) return fallbackRouter(state, "business_analyst");
-    const lastMsg = msgs[msgs.length - 1];
-    const status = extractStatus(lastMsg.content);
+// --- Build graph dynamically from config ---
+const activeAgents = getActiveAgents();
+const workflow = new StateGraph(GraphState);
 
-    switch(status) {
-        case "REQUIREMENTS_DRAFTED":
-            return ["software_architect", "ux_designer"];
-        case "BA_PHASE_CONTINUE":
-            return ["business_analyst"];
-        case "REQUIREMENTS_APPROVED":
-            const msgsBefore = state.messages.slice(0, -1);
-            const lastOther = msgsBefore.filter(m => m.name !== "business_analyst").pop();
-            if (lastOther && lastOther.name === "software_architect") return ["backend_software_engineer"];
-            if (lastOther && lastOther.name === "ux_designer") return ["frontend_software_engineer"];
-            return ["software_architect"]; 
-        case "REQUIREMENTS_AMBIGUOUS":
-            const msgsBefore2 = state.messages.slice(0, -1);
-            const lastOther2 = msgsBefore2.filter(m => m.name !== "business_analyst").pop();
-            if (lastOther2) return [lastOther2.name];
-            return ["software_architect"];
-        case "DIRECTIVE_CLEAR":
-            return ["business_analyst"];
-        case "DIRECTIVE_AMBIGUOUS":
-        case "QUESTION":
-            return [END]; 
-        default:
-            return fallbackRouter(state, "business_analyst");
-    }
+for (const agentId of activeAgents) {
+    workflow.addNode(agentId, (state, cfg) => genericNode(agentId, state, cfg));
 }
 
-function routeFromSA(state) {
-    const msgs = state.messages.filter(m => m.name === "software_architect");
-    if (!msgs.length) return fallbackRouter(state, "software_architect");
-    const lastMsg = msgs[msgs.length - 1];
-    const status = extractStatus(lastMsg.content);
+workflow.addConditionalEdges(START, routeFromStart);
 
-    switch(status) {
-        case "DESIGN_COMPLETE":
-            return ["business_analyst"];
-        case "ARCHITECT_PHASE_CONTINUE":
-            return ["software_architect"];
-        case "DESIGN_SATISFIED":
-        case "DESIGN_APPROVED":
-            return ["backend_software_engineer"];
-        case "QUESTION":
-            return ["business_analyst"];
-        case "DESIGN_CLARIFIED":
-            return ["software_architect"];
-        default:
-            return fallbackRouter(state, "software_architect");
-    }
+for (const agentId of activeAgents) {
+    workflow.addConditionalEdges(agentId, buildRouteFunction(agentId));
 }
-
-function routeFromUXD(state) {
-    const msgs = state.messages.filter(m => m.name === "ux_designer");
-    if (!msgs.length) return fallbackRouter(state, "ux_designer");
-    const lastMsg = msgs[msgs.length - 1];
-    const status = extractStatus(lastMsg.content);
-
-    switch(status) {
-        case "DESIGN_COMPLETE":
-            return ["business_analyst"];
-        case "UXD_PHASE_CONTINUE":
-            return ["ux_designer"];
-        case "DESIGN_APPROVED":
-        case "DESIGN_SATISFIED":
-            return ["frontend_software_engineer"];
-        case "QUESTION":
-            return ["business_analyst"];
-        case "DESIGN_CLARIFIED":
-            return ["ux_designer"];
-        default:
-            return fallbackRouter(state, "ux_designer");
-    }
-}
-
-function routeFromBSE(state) {
-    const msgs = state.messages.filter(m => m.name === "backend_software_engineer");
-    if (!msgs.length) return fallbackRouter(state, "backend_software_engineer");
-    const lastMsg = msgs[msgs.length - 1];
-    const status = extractStatus(lastMsg.content);
-
-    switch(status) {
-        case "IMPLEMENTATION_COMPLETE":
-            return ["software_architect"];
-        case "BSE_PHASE_CONTINUE":
-            return ["backend_software_engineer"];
-        case "IMPLEMENTATION_APPROVED":
-            return ["quality_engineer"];
-        case "QUESTION":
-            return ["software_architect"];
-        case "IMPLEMENTATION_CLARIFIED":
-            return ["backend_software_engineer"];
-        default:
-            return fallbackRouter(state, "backend_software_engineer");
-    }
-}
-
-function routeFromFSE(state) {
-    const msgs = state.messages.filter(m => m.name === "frontend_software_engineer");
-    if (!msgs.length) return fallbackRouter(state, "frontend_software_engineer");
-    const lastMsg = msgs[msgs.length - 1];
-    const status = extractStatus(lastMsg.content);
-
-    switch(status) {
-        case "IMPLEMENTATION_COMPLETE":
-            return ["ux_designer"];
-        case "FSE_PHASE_CONTINUE":
-            return ["frontend_software_engineer"];
-        case "IMPLEMENTATION_APPROVED":
-            return ["quality_engineer"];
-        case "QUESTION":
-            return ["ux_designer"];
-        case "IMPLEMENTATION_CLARIFIED":
-            return ["frontend_software_engineer"];
-        default:
-            return fallbackRouter(state, "frontend_software_engineer");
-    }
-}
-
-function routeFromQE(state) {
-    const msgs = state.messages.filter(m => m.name === "quality_engineer");
-    if (!msgs.length) return fallbackRouter(state, "quality_engineer");
-    const lastMsg = msgs[msgs.length - 1];
-    const status = extractStatus(lastMsg.content);
-
-    switch(status) {
-        case "TESTING_COMPLETE":
-        case "TESTS_PASSED":
-            return [END];
-        case "QE_PHASE_CONTINUE":
-            return ["quality_engineer"];
-        case "REJECTED":
-            const msgsBefore = state.messages.slice(0, -1);
-            const lastOther = msgsBefore.filter(m => m.name === "backend_software_engineer" || m.name === "frontend_software_engineer").pop();
-            if (lastOther) return [lastOther.name];
-            return ["backend_software_engineer"]; 
-        case "QUESTION":
-            const msgsBeforeQ = state.messages.slice(0, -1);
-            const lastOtherQ = msgsBeforeQ.filter(m => m.name === "backend_software_engineer" || m.name === "frontend_software_engineer").pop();
-            if (lastOtherQ) return [lastOtherQ.name];
-            return ["backend_software_engineer"]; 
-        case "QE_CLARIFIED":
-            return ["quality_engineer"];
-        default:
-            return fallbackRouter(state, "quality_engineer");
-    }
-}
-
-const workflow = new StateGraph(GraphState)
-  .addNode("business_analyst", (state, config) => genericNode("business_analyst", state, config))
-  .addNode("software_architect", (state, config) => genericNode("software_architect", state, config))
-  .addNode("backend_software_engineer", (state, config) => genericNode("backend_software_engineer", state, config))
-  .addNode("frontend_software_engineer", (state, config) => genericNode("frontend_software_engineer", state, config))
-  .addNode("ux_designer", (state, config) => genericNode("ux_designer", state, config))
-  .addNode("quality_engineer", (state, config) => genericNode("quality_engineer", state, config))
-  
-  .addConditionalEdges(START, routeFromStart)
-  .addConditionalEdges("business_analyst", routeFromBA)
-  .addConditionalEdges("software_architect", routeFromSA)
-  .addConditionalEdges("ux_designer", routeFromUXD)
-  .addConditionalEdges("backend_software_engineer", routeFromBSE)
-  .addConditionalEdges("frontend_software_engineer", routeFromFSE)
-  .addConditionalEdges("quality_engineer", routeFromQE);
 
 const app = workflow.compile({ checkpointer });
-export { app, routerLLM };
+export { app, routerLLM, initConfig };

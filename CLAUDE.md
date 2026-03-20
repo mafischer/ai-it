@@ -36,9 +36,9 @@ Approval loops allow Quality Engineer to send work back upstream. The two parall
 
 ### Routing Mechanism
 
-Agents append `STATUS: <TOKEN>` to their output (e.g., `STATUS: REQUIREMENTS_DRAFTED`). Router functions in `index.js` parse these tokens deterministically using the **last** STATUS match (to avoid false matches from thinking content). When a token isn't recognized, a fallback LLM router (`lfm2-8b`) handles routing using a JSON-format routing ruleset defined in the Project Manager role prompt.
+Agents append `STATUS: <TOKEN>` to their output (e.g., `STATUS: REQUIREMENTS_DRAFTED`). Routing rules are defined declaratively in `workflow.json` — each agent has a `routes` map of STATUS tokens to targets. `index.js` builds route functions dynamically from this config, using the **last** STATUS match to avoid false matches from thinking content. Special DSL tokens: `$self` (loop back), `__end__` (stop), `$map_previous` (context-dependent mapping), `$previous_matching` (find last matching agent), and array targets for parallel fan-out. Unrecognized tokens fall back to an LLM router (`lfm2-8b`).
 
-When BA outputs `DIRECTIVE_AMBIGUOUS`, the workflow stops at `END` and waits for user input. On the user's reply, BA skips the query prompt and goes directly to `main`, with the BA's prior questions and the user's answers injected via `priorQuestions`/`userResponse` template values in `roles.js`.
+When BA outputs `DIRECTIVE_AMBIGUOUS`, the workflow stops at `END` and waits for user input. On the user's reply, BA skips the query prompt and goes directly to `main`, with the BA's prior questions and the user's answers injected via `priorQuestions`/`userResponse` Mustache template values in `workflow.json`.
 
 ### LLM Models
 
@@ -55,10 +55,14 @@ Thread IDs are MD5 hashes of the original user directive. LangGraph checkpoints 
 
 ## Key Files
 
-- **`index.js`** — LangGraph workflow: state definition, node implementations, routing functions, compiled graph with SQLite checkpointer
+- **`workflow.json`** — Declarative workflow DSL: agent definitions (role, emoji, mission, model, Mustache prompt templates), routing rules (STATUS → target with DSL tokens), pipeline config (entry agent, question statuses), and fallback router prompt. Edit this file to add/modify agents — no code changes needed.
+- **`src/config/loader.js`** — Reads `workflow.json`; exports `getConfig()`, `getActiveAgents()`, `getAgent()`, `getAgentEmojis()`, `getAgentMissions()`, `getRouting()`, `getPipeline()`
+- **`src/config/templates.js`** — Mustache renderer: `renderPrompt(agentId, variant, values)` with HTML escaping disabled
+- **`src/config/routing.js`** — Resolves DSL routing tokens (`$self`, `$map_previous`, `$previous_matching`, `__end__`, arrays) into concrete agent IDs
+- **`index.js`** — LangGraph workflow: builds graph dynamically from `workflow.json`, generic node implementation, config-driven routing and prompt selection, compiled with SQLite checkpointer
 - **`server.js`** — Express server: OpenAI-compatible endpoints, streaming multiplexer, thread ID management, admin API (`/admin/api/*`), lifecycle hooks (graceful shutdown, stale connection flush)
 - **`admin/index.html`** — Vue.js 3 + Vuetify 3 SPA for the admin UI (`/admin`). Thread list with active status polling, thread detail with message viewer, rewind, abort, and delete. Dark theme with Material Design.
-- **`src/agents/roles.js`** — System prompts for all 8 roles; each role has `main()`, `continue()`, `approval()`, and `query()` prompt variants with template placeholders
+- **`src/agents/roles.js`** — Legacy prompt definitions (no longer imported by `index.js`; prompts now live in `workflow.json` as Mustache templates)
 - **`src/utils/llm.js`** — `createLLM(modelId)` factory; maps model IDs to env vars, sets `maxTokens: 32768`, temperature 0, disables fetch timeouts; passes `thinking_budget` via `modelKwargs` for Qwen3 models
 - **`src/agents/factory.js`** — `createAgent()` helper (not used in main pipeline)
 - **`patches/langchain-openai-reasoning.js`** — Postinstall patch for `@langchain/openai` to preserve `reasoning_content` from vllm-mlx's reasoning parser; wraps it in `<think>` tags so Open WebUI renders collapsible thinking blocks
@@ -74,4 +78,4 @@ Thread IDs are MD5 hashes of the original user directive. LangGraph checkpoints 
 
 ## Unintegrated Agents
 
-`Site Reliability Engineer` and `DevOps Engineer` roles are defined in `roles.js` but not wired into the LangGraph workflow in `index.js`.
+`Site Reliability Engineer`, `DevOps Engineer`, and `Support Engineer` are defined in `workflow.json` with `"active": false` — they have prompts and routing but are excluded from the graph at build time.
