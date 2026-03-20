@@ -162,6 +162,16 @@ server.post("/v1/chat/completions", async (req, res) => {
     res.write(": keep-alive\n\n");
   }, 15000);
 
+  // Stale request guard — abort if no tokens arrive within 90s
+  let lastTokenTime = Date.now();
+  const staleGuard = setInterval(() => {
+      if (Date.now() - lastTokenTime > 90000) {
+          console.error("[STREAM] Stale request detected (no tokens for 90s), aborting");
+          abortController.abort();
+          clearInterval(staleGuard);
+      }
+  }, 10000);
+
   try {
     const eventStream = await app.streamEvents(
       { messages: [{ role: "user", content: lastUserMessage }] },
@@ -177,17 +187,7 @@ server.post("/v1/chat/completions", async (req, res) => {
     const syncActiveAgent = () => { activeThreadAgents[threadId] = { current: activeAgent, queue: [...agentQueue] }; };
 
     // --- STATS ---
-    const agentStats = {}; // { agentName: { startTime, tokenCount, promptChars } }
-
-    // Stale request guard — abort if no tokens arrive within 90s
-    let lastTokenTime = Date.now();
-    const staleGuard = setInterval(() => {
-        if (Date.now() - lastTokenTime > 90000) {
-            console.error("[STREAM] Stale request detected (no tokens for 90s), aborting");
-            abortController.abort();
-            clearInterval(staleGuard);
-        }
-    }, 10000);
+    const agentStats = {}; // { agentName: { startTime, tokenCount, promptChars } };
 
     const writeChunk = (content) => {
         const chunk = {
@@ -365,184 +365,14 @@ function getCheckpointDB(writable = false) {
     return new Database("./checkpoints.db", { readonly: !writable });
 }
 
-server.get("/admin", (req, res) => {
-    res.type("html").send(`<!DOCTYPE html>
-<html><head><title>AI-IT Admin</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
-  h1 { color: #58a6ff; margin-bottom: 1.5rem; }
-  .thread { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 0.75rem; cursor: pointer; transition: border-color 0.2s; }
-  .thread:hover { border-color: #58a6ff; }
-  .thread-id { font-family: monospace; color: #8b949e; font-size: 0.85rem; }
-  .directive { margin: 0.4rem 0; font-size: 1rem; }
-  .meta { color: #8b949e; font-size: 0.85rem; }
-  .agent-tag { display: inline-block; background: #1f6feb22; color: #58a6ff; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.75rem; margin-right: 0.3rem; }
-  .thread-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
-  .thread-row .thread { margin-bottom: 0; }
-  .btn { border: none; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; font-size: 0.85rem; }
-  .btn-danger { background: #da3633; color: #fff; margin-bottom: 1rem; }
-  .btn-danger:hover { background: #f85149; }
-  .btn-sm-danger { background: #da363344; color: #f85149; border: 1px solid #da363366; border-radius: 6px; padding: 0.5rem 0.75rem; cursor: pointer; font-size: 1rem; }
-  .btn-sm-danger:hover { background: #da3633; color: #fff; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #58a6ff44; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-left: 0.5rem; vertical-align: middle; }
-</style></head><body>
-<script>
-function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-async function pollList(){
-  try{
-    const[threadsRes,activeRes]=await Promise.all([fetch('/admin/api/threads'),fetch('/admin/api/active')]);
-    const threads=await threadsRes.json();
-    const activeIds=(await activeRes.json()).map(i=>i.thread_id);
-    const container=document.getElementById('thread-list');
-    container.innerHTML=threads.map(t=>{
-      const spin=activeIds.includes(t.thread_id)?'<span class="spinner"></span>':'';
-      return '<div class="thread-row" data-thread="'+t.thread_id+'">'
-        +'<a href="/admin/thread/'+t.thread_id+'" style="text-decoration:none;color:inherit;flex:1">'
-        +'<div class="thread"><div class="thread-id">'+t.thread_id+spin+'</div>'
-        +'<div class="directive">'+esc(t.directive)+'</div>'
-        +'<div class="meta">'+t.msgCount+' messages &middot; '+t.agents.map(a=>'<span class="agent-tag">'+esc(a)+'</span>').join('')+'</div>'
-        +'</div></a>'
-        +'<button class="btn btn-sm-danger" onclick="event.stopPropagation();if(confirm(&quot;Delete this conversation?&quot;)){fetch(&quot;/admin/api/threads/'+t.thread_id+'&quot;,{method:&quot;DELETE&quot;}).then(()=>pollList())}">🗑</button>'
-        +'</div>';
-    }).join('')||'<p style="color:#8b949e">No conversations yet.</p>';
-  }catch{}
-}
-pollList();setInterval(pollList,3000);
-</script>
-<h1>🧠 AI-IT Conversations</h1>
-<button class="btn btn-danger" onclick="if(confirm('Delete ALL conversations?')){fetch('/admin/api/threads',{method:'DELETE'}).then(()=>pollList())}">🗑 Delete All</button>
-<div id="thread-list"></div>
-</body></html>`);
-});
+// Serve Vue.js admin SPA
+import { fileURLToPath } from "url";
+import path from "path";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const adminDir = path.join(__dirname, "admin");
+server.get("/admin", (req, res) => res.sendFile(path.join(adminDir, "index.html")));
+server.use("/admin", express.static(adminDir));
 
-server.get("/admin/thread/:threadId", (req, res) => {
-    const { threadId } = req.params;
-    const db = getCheckpointDB();
-
-    const checkpoints = db.prepare(`
-        SELECT checkpoint_id, checkpoint FROM checkpoints
-        WHERE thread_id = ? AND checkpoint_ns = ''
-        ORDER BY checkpoint_id DESC
-    `).all(threadId);
-
-    if (!checkpoints.length) {
-        db.close();
-        return res.status(404).send("Thread not found");
-    }
-
-    // Collect all unique messages across all checkpoints (deduplicated by content hash)
-    const seenIds = new Set();
-    const allMessages = [];
-    for (const cp of checkpoints) {
-        try {
-            const data = JSON.parse(cp.checkpoint);
-            const msgs = data.channel_values?.messages || [];
-            for (const m of msgs) {
-                const id = m.id || m.kwargs?.id || JSON.stringify(m.kwargs?.content || "").slice(0, 80);
-                if (!seenIds.has(id)) {
-                    seenIds.add(id);
-                    const kwargs = m.kwargs || {};
-                    allMessages.push({
-                        id,
-                        type: m.type || kwargs.type || "unknown",
-                        role: kwargs.role || (kwargs.name ? "assistant" : m.type === "human" ? "user" : "assistant"),
-                        name: kwargs.name || "",
-                        content: kwargs.content || "",
-                        checkpoint_id: cp.checkpoint_id,
-                    });
-                }
-            }
-        } catch {}
-    }
-    db.close();
-
-    // Show latest checkpoint state (messages in order)
-    const latestData = JSON.parse(checkpoints[0].checkpoint);
-    const latestMsgs = (latestData.channel_values?.messages || []).map(m => {
-        const kwargs = m.kwargs || {};
-        const type = m.type || "";
-        const role = type === "human" ? "user"
-            : kwargs.name ? "assistant"
-            : kwargs.role === "user" || kwargs.role === "human" ? "user"
-            : type === "ai" ? "assistant"
-            : kwargs.content?.startsWith("---\n") ? "system" // orchestration headers (stale data)
-            : "user";
-        return { type, role, name: kwargs.name || "", content: kwargs.content || "" };
-    });
-
-    function esc(s) { return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
-
-    const msgsHtml = latestMsgs.map((m, i) => {
-        const statusMatches = [...(m.content || "").matchAll(/STATUS:\s*([A-Z_]+)/g)];
-        const status = statusMatches.length ? statusMatches[statusMatches.length - 1][1] : "";
-        const statusClass = status.includes("COMPLETE") || status.includes("PASSED") || status.includes("APPROVED") ? "complete" : status.includes("AMBIGUOUS") ? "ambiguous" : "";
-        const e = agentEmoji[m.name] || (m.role === "user" ? "👤" : "🤖");
-        const statusTag = status ? '<span class="status-tag ' + statusClass + '">' + status + '</span>' : "";
-        const rewindBtn = '<button class="btn-rewind rewind-btn" onclick="if(confirm(\'Rewind to this point and re-run?\')){fetch(\'/admin/api/threads/' + threadId + '/rewind\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({messageIndex:' + i + '})}).then(r=>r.json()).then(d=>{alert(d.message||d.error);location.reload()})}">⏪ Rewind</button>';
-        return '<div class="msg ' + m.role + '">' +
-            '<div class="msg-header"><span class="msg-role ' + m.role + '">' + e + " " + esc(m.name || m.role) + '</span><span>' + statusTag + rewindBtn + '</span></div>' +
-            '<div class="msg-content">' + esc(m.content) + '</div></div>';
-    }).join("");
-
-    res.type("html").send('<!DOCTYPE html><html><head><title>Thread ' + threadId + '</title>' +
-'<style>' +
-'* { margin: 0; padding: 0; box-sizing: border-box; }' +
-'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; max-width: 960px; margin: 0 auto; }' +
-'h1 { color: #58a6ff; margin-bottom: 0.5rem; }' +
-'.back { color: #58a6ff; text-decoration: none; display: inline-block; margin-bottom: 1.5rem; }' +
-'.back:hover { text-decoration: underline; }' +
-'.meta-bar { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; font-size: 0.85rem; color: #8b949e; }' +
-'.msg { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 0.75rem; }' +
-'.msg.user { border-left: 3px solid #3fb950; }' +
-'.msg.assistant { border-left: 3px solid #58a6ff; }' +
-'.msg-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }' +
-'.msg-role { font-weight: 600; font-size: 0.9rem; }' +
-'.msg-role.user { color: #3fb950; }' +
-'.msg-role.assistant { color: #58a6ff; }' +
-'.msg-content { white-space: pre-wrap; font-size: 0.9rem; line-height: 1.5; max-height: 400px; overflow-y: auto; }' +
-'.status-tag { display: inline-block; background: #da3633; color: #fff; padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-family: monospace; }' +
-'.status-tag.complete { background: #3fb950; }' +
-'.status-tag.ambiguous { background: #d29922; }' +
-'.btn-rewind { background: #1f6feb33; color: #58a6ff; border: 1px solid #1f6feb66; border-radius: 4px; padding: 0.2rem 0.6rem; cursor: pointer; font-size: 0.75rem; margin-left: 0.5rem; }' +
-'.btn-rewind:hover { background: #1f6feb; color: #fff; }' +
-'.btn-abort { display: none; background: #da3633; color: #fff; border: none; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; font-size: 0.85rem; margin-left: 1rem; }' +
-'.btn-abort:hover { background: #f85149; }' +
-'.btn-abort.visible { display: inline-block; }' +
-'@keyframes spin { to { transform: rotate(360deg); } }' +
-'.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #58a6ff44; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-left: 0.5rem; vertical-align: middle; }' +
-'@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }' +
-'.skeleton { background: #161b22; border: 1px solid #30363d; border-radius: 8px; border-left: 3px solid #58a6ff; padding: 1rem 1.25rem; margin-bottom: 0.75rem; display: none; }' +
-'.skeleton.active { display: block; }' +
-'.skeleton-line { height: 0.75rem; border-radius: 4px; margin-bottom: 0.5rem; background: linear-gradient(90deg, #21262d 25%, #30363d 50%, #21262d 75%); background-size: 200% 100%; animation: shimmer 1.5s ease-in-out infinite; }' +
-'.skeleton-line:nth-child(1) { width: 30%; height: 0.85rem; margin-bottom: 0.75rem; }' +
-'.skeleton-line:nth-child(2) { width: 90%; }' +
-'.skeleton-line:nth-child(3) { width: 75%; }' +
-'.skeleton-line:nth-child(4) { width: 60%; }' +
-'</style></head><body>' +
-'<script>const emojis=' + JSON.stringify(agentEmoji) + ';' +
-'async function pollActive(){try{const r=await fetch("/admin/api/active");const items=await r.json();' +
-'const entry=items.find(i=>i.thread_id==="' + threadId + '");const isActive=!!entry;' +
-'const sp=document.getElementById("thread-spinner");if(isActive){if(!sp){const s=document.createElement("span");s.className="spinner";s.id="thread-spinner";document.getElementById("thread-title").appendChild(s)}}else{if(sp)sp.remove()}' +
-'const sk=document.getElementById("skeleton-msg");const skTitle=document.getElementById("skeleton-title");' +
-'if(isActive){sk.classList.add("active");const ag=entry.agent;if(ag&&skTitle){const name=ag.replace(/_/g," ").replace(/\\b\\w/g,c=>c.toUpperCase());skTitle.textContent=(emojis[ag]||"🤖")+" "+name+"…"}}else{sk.classList.remove("active")}' +
-'document.querySelectorAll(".rewind-btn").forEach(b=>{b.style.display=isActive?"none":""});' +
-'document.getElementById("abort-btn").classList.toggle("visible",isActive);' +
-'}catch{}}pollActive();setInterval(pollActive,2000)</script>' +
-'<a class="back" href="/admin">&larr; All Conversations</a>' +
-'<div style="display:flex;align-items:center;margin-bottom:0.5rem"><h1 id="thread-title" style="margin:0">Thread ' + threadId + '</h1>' +
-'<button class="btn-abort" id="abort-btn" onclick="if(confirm(\'Abort active workflow?\')){fetch(\'/admin/api/threads/' + threadId + '/abort\',{method:\'POST\'}).then(r=>r.json()).then(d=>{alert(d.message||d.error);location.reload()})}">⏹ Abort</button></div>' +
-'<div class="meta-bar">' + checkpoints.length + ' checkpoints &middot; ' + latestMsgs.length + ' messages in latest state</div>' +
-msgsHtml +
-'<div class="skeleton" id="skeleton-msg">' +
-'<div id="skeleton-title" style="font-weight:600;font-size:0.9rem;color:#58a6ff;margin-bottom:0.6rem">⏳ Processing…</div>' +
-'<div class="skeleton-line"></div>' +
-'<div class="skeleton-line"></div>' +
-'<div class="skeleton-line"></div>' +
-'</div>' +
-'</body></html>');
-});
 
 // ── Admin API endpoints ──────────────────────────────────────────────────────
 const activeThreadAgents = {}; // { threadId: { current: "business_analyst", queue: [...] } }
@@ -575,6 +405,28 @@ server.get("/admin/api/threads", (req, res) => {
     }).filter(t => t && !t.directive.startsWith("### Task:") && !t.directive.startsWith("(empty)"));
     db.close();
     res.json(result);
+});
+
+server.get("/admin/api/threads/:threadId/messages", (req, res) => {
+    const db = getCheckpointDB();
+    const row = db.prepare(
+        "SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id DESC LIMIT 1"
+    ).get(req.params.threadId);
+    db.close();
+    if (!row) return res.status(404).json([]);
+    try {
+        const data = JSON.parse(row.checkpoint);
+        const msgs = (data.channel_values?.messages || []).map(m => {
+            const kwargs = m.kwargs || {};
+            const type = m.type || "";
+            const role = type === "human" ? "user"
+                : kwargs.name ? "assistant"
+                : kwargs.role === "user" || kwargs.role === "human" ? "user"
+                : type === "ai" ? "assistant" : "user";
+            return { role, name: kwargs.name || "", content: kwargs.content || "" };
+        });
+        res.json(msgs);
+    } catch { res.json([]); }
 });
 
 server.get("/admin/api/active", (req, res) => {

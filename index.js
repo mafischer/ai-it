@@ -185,7 +185,7 @@ function routeFromBA(state) {
     const status = extractStatus(lastMsg.content);
 
     switch(status) {
-        case "REQUIREMENTS_COMPLETE":
+        case "REQUIREMENTS_DRAFTED":
             return ["software_architect", "ux_designer"];
         case "BA_PHASE_CONTINUE":
             return ["business_analyst"];

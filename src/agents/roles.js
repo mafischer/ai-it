@@ -23,7 +23,7 @@ export const roles = {
           1. MISSION: Extract technical requirements from the USER directive.
           2. ACTION: Provide a Requirements Specification.${clarificationContext}
           3. STRATEGY: If the project is complex, provide requirements in PHASES.
-          4. EXIT: When the ENTIRE specification is done, you MUST end with: "STATUS: REQUIREMENTS_COMPLETE".
+          4. EXIT: When the ENTIRE specification is done, you MUST end with: "STATUS: REQUIREMENTS_DRAFTED".
           5. INTERIM: If you need to stop early due to length, end with: "STATUS: BA_PHASE_CONTINUE".
           6. DIRECTIVE: ${currentDirective}
         `;
@@ -36,7 +36,7 @@ export const roles = {
           1. MISSION: Continue extracting technical requirements from the USER directive; here are the requirements so far: \n${currentRequirements}.
           2. ACTION: Complete the Requirements Specification, starting where you left off, DO NOT INCLUDE the requirements so far in your response. 
           3. STRATEGY: If the project is complex, provide requirements in PHASES.
-          4. EXIT: When the ENTIRE specification is done, you MUST end with: "STATUS: REQUIREMENTS_COMPLETE".
+          4. EXIT: When the ENTIRE specification is done, you MUST end with: "STATUS: REQUIREMENTS_DRAFTED".
           5. INTERIM: If you need to stop early due to length, end with: "STATUS: BA_PHASE_CONTINUE".
           6. DIRECTIVE: ${currentDirective}
         `;

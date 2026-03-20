@@ -1,6 +1,22 @@
 [STATS] business_analyst prompt: 1,151 chars
-[STATS] business_analyst done: 2037 tokens in 167.1s (12.2 t/s)
-[STATS] business_analyst prompt: 925 chars
-[STATS] business_analyst prompt: 1,151 chars
-[STATS] business_analyst done: 2037 tokens in 171.2s (11.9 t/s)
-[STATS] business_analyst prompt: 925 chars
+[STATS] business_analyst done: 2037 tokens in 171.3s (11.9 t/s)
+[STATS] business_analyst prompt: 924 chars
+[STATS] business_analyst done: 3783 tokens in 289.6s (13.1 t/s)
+[STATS] software_architect prompt: 7,269 chars
+[STATS] ux_designer prompt: 7,261 chars
+[STATS] software_architect done: 2795 tokens in 286.8s (9.7 t/s)
+[STATS] ux_designer done: 2636 tokens in 475.8s (5.5 t/s)
+[STATS] software_architect prompt: 4,516 chars
+[STATS] ux_designer prompt: 456 chars
+[STATS] software_architect done: 4233 tokens in 323.9s (13.1 t/s)
+[STATS] ux_designer done: 4050 tokens in 613.2s (6.6 t/s)
+[STATS] business_analyst prompt: 10,287 chars
+[STATS] business_analyst done: 2202 tokens in 243.7s (9.0 t/s)
+[STATS] frontend_software_engineer prompt: 1,258 chars
+[STATS] frontend_software_engineer done: 1976 tokens in 144.6s (13.7 t/s)
+[STATS] frontend_software_engineer prompt: 2,680 chars
+[STATS] frontend_software_engineer done: 6079 tokens in 470.4s (12.9 t/s)
+[STATS] ux_designer prompt: 15,315 chars
+[STATS] ux_designer prompt: 2,323 chars
+[STATS] ux_designer done: 12 tokens in 6.4s (1.9 t/s)
+[STATS] ux_designer prompt: 3,091 chars
