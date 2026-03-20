@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "postinstall": "node patches/langchain-openai-reasoning.js"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +18,7 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "langchain": "^1.2.32",
+    "undici": "^7.24.4",
     "zod": "^4.3.6"
   }
 }

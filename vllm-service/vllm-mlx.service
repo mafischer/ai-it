@@ -1,0 +1,23 @@
+[Unit]
+Description=vllm-mlx inference server (Qwen3.5-27B)
+After=network.target
+
+[Service]
+Type=simple
+User=michael
+WorkingDirectory=/Users/michael/.vllm-mlx
+ExecStart=/Users/michael/.vllm-mlx/vllm-mlx-wrapper serve mlx-community/Qwen3.5-27B-5bit \
+    --port 8081 \
+    --reasoning-parser qwen3 \
+    --max-tokens 32768 \
+    --thinking-budget 256 \
+    --context-window 32768
+Restart=always
+RestartSec=5
+StandardOutput=append:/Users/michael/.vllm-mlx/vllm.out
+StandardError=append:/Users/michael/.vllm-mlx/vllm.err
+Environment=HOME=/Users/michael
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin
+
+[Install]
+WantedBy=default.target

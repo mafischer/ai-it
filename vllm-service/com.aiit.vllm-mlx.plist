@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiit.vllm-mlx</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/michael/.vllm-mlx/vllm-mlx-wrapper</string>
+        <string>serve</string>
+        <string>mlx-community/Qwen3.5-27B-5bit</string>
+        <string>--port</string>
+        <string>8081</string>
+        <string>--reasoning-parser</string>
+        <string>qwen3</string>
+        <string>--max-tokens</string>
+        <string>32768</string>
+        <string>--thinking-budget</string>
+        <string>256</string>
+        <string>--context-window</string>
+        <string>16384</string>
+        <string>--timeout</string>
+        <string>600</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/Users/michael/.vllm-mlx/vllm.err</string>
+    <key>StandardOutPath</key>
+    <string>/Users/michael/.vllm-mlx/vllm.out</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/michael</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/michael/.vllm-mlx</string>
+</dict>
+</plist>

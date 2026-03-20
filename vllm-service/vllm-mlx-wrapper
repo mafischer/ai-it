@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# vllm-mlx-wrapper
+#
+# Intercepts --thinking-budget and --context-window flags, patches the model's
+# config files in-place before launching vllm-mlx, then restores the originals
+# on clean exit, crash, or signal (SIGINT / SIGTERM / SIGHUP).
+#
+# All other arguments are passed through to vllm-mlx unchanged.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VLLM_BIN="$SCRIPT_DIR/venv/bin/vllm-mlx"
+HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}/hub"
+
+# ── Arg parsing ────────────────────────────────────────────────────────────────
+THINKING_BUDGET=""
+CONTEXT_WINDOW=""
+PASSTHROUGH=()
+MODEL_ID=""
+PORT="8081"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --thinking-budget) THINKING_BUDGET="$2"; shift 2 ;;
+        --context-window)  CONTEXT_WINDOW="$2";  shift 2 ;;
+        --port)            PORT="$2"; PASSTHROUGH+=("$1" "$2"); shift 2 ;;
+        serve)
+            PASSTHROUGH+=("$1"); shift
+            MODEL_ID="$1"; PASSTHROUGH+=("$1"); shift ;;
+        *) PASSTHROUGH+=("$1"); shift ;;
+    esac
+done
+
+# ── Kill zombie processes on the port ─────────────────────────────────────────
+ZOMBIE_PIDS=$(lsof -ti:"$PORT" 2>/dev/null || true)
+if [[ -n "$ZOMBIE_PIDS" ]]; then
+    echo "[wrapper] Killing zombie process(es) on port $PORT: $ZOMBIE_PIDS" >&2
+    echo "$ZOMBIE_PIDS" | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
+
+# ── Resolve HF model cache path ────────────────────────────────────────────────
+resolve_model_path() {
+    local id="$1"
+    # Already a local path
+    [[ -d "$id" ]] && { echo "$id"; return; }
+    # Hugging Face cache: mlx-community/Qwen3.5-27B-5bit → models--mlx-community--Qwen3.5-27B-5bit
+    local snapshots="$HF_CACHE/models--$(echo "$id" | sed 's|/|--|g')/snapshots"
+    [[ ! -d "$snapshots" ]] && { echo ""; return; }
+    echo "$snapshots/$(ls -t "$snapshots" | head -1)"
+}
+
+MODEL_PATH=""
+[[ -n "$MODEL_ID" ]] && MODEL_PATH=$(resolve_model_path "$MODEL_ID")
+
+if [[ -z "$MODEL_PATH" ]]; then
+    echo "[wrapper] Warning: could not resolve model path for '${MODEL_ID:-?}'; skipping config patches." >&2
+fi
+
+# ── Backup & patch ─────────────────────────────────────────────────────────────
+CONFIG_JSON="$MODEL_PATH/config.json"
+GEN_CONFIG="$MODEL_PATH/generation_config.json"
+
+TMP_DIR=$(mktemp -d)
+CONFIG_PATCHED=false
+GEN_CONFIG_PATCHED=false
+VLLM_PID=""
+
+cleanup() {
+    if [[ -n "$VLLM_PID" ]]; then
+        kill "$VLLM_PID" 2>/dev/null || true
+        wait "$VLLM_PID" 2>/dev/null || true
+        VLLM_PID=""
+    fi
+    if [[ "$CONFIG_PATCHED" == true ]]; then
+        cp "$TMP_DIR/config.json" "$CONFIG_JSON"
+        echo "[wrapper] Restored config.json" >&2
+        CONFIG_PATCHED=false
+    fi
+    if [[ "$GEN_CONFIG_PATCHED" == true ]]; then
+        cp "$TMP_DIR/generation_config.json" "$GEN_CONFIG"
+        echo "[wrapper] Restored generation_config.json" >&2
+        GEN_CONFIG_PATCHED=false
+    fi
+    rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT INT TERM HUP
+
+# Patch context window → text_config.max_position_embeddings in config.json
+if [[ -n "$CONTEXT_WINDOW" && -n "$MODEL_PATH" && -f "$CONFIG_JSON" ]]; then
+    cp "$CONFIG_JSON" "$TMP_DIR/config.json"
+    CONFIG_PATCHED=true
+    python3 - "$CONFIG_JSON" "$CONTEXT_WINDOW" <<'PYEOF'
+import json, sys
+path, val = sys.argv[1], int(sys.argv[2])
+with open(path) as f:
+    c = json.load(f)
+target = c.get("text_config", c)
+target["max_position_embeddings"] = val
+if "text_config" in c:
+    c["text_config"] = target
+with open(path, "w") as f:
+    json.dump(c, f, indent=2)
+PYEOF
+    echo "[wrapper] Patched max_position_embeddings → $CONTEXT_WINDOW" >&2
+fi
+
+# Patch thinking budget → thinking_budget in generation_config.json
+if [[ -n "$THINKING_BUDGET" && -n "$MODEL_PATH" && -f "$GEN_CONFIG" ]]; then
+    cp "$GEN_CONFIG" "$TMP_DIR/generation_config.json"
+    GEN_CONFIG_PATCHED=true
+    python3 - "$GEN_CONFIG" "$THINKING_BUDGET" <<'PYEOF'
+import json, sys
+path, val = sys.argv[1], int(sys.argv[2])
+with open(path) as f:
+    c = json.load(f)
+c["thinking_budget"] = val
+with open(path, "w") as f:
+    json.dump(c, f, indent=2)
+PYEOF
+    echo "[wrapper] Patched thinking_budget → $THINKING_BUDGET" >&2
+fi
+
+# ── Launch ─────────────────────────────────────────────────────────────────────
+echo "[wrapper] Launching: $VLLM_BIN ${PASSTHROUGH[*]}" >&2
+"$VLLM_BIN" "${PASSTHROUGH[@]}" &
+VLLM_PID=$!
+wait "$VLLM_PID"

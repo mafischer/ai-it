@@ -1,4 +1,11 @@
 import { ChatOpenAI } from "@langchain/openai";
+import { setGlobalDispatcher, Agent } from "undici";
+
+// Disable native fetch timeouts for long-running local LLM inferences
+setGlobalDispatcher(new Agent({
+  headersTimeout: 0,
+  bodyTimeout: 0,
+}));
 
 /**
  * Helper to resolve runtime configuration from environment variables.
@@ -8,7 +15,7 @@ export function getRuntimeConfig(modelId) {
   
   const defaults = {
       "LFM2_8B": "http://10.3.0.241:8080/v1",
-      "QWEN3_5_27B": "http://localhost:1234/v1"
+      "QWEN3_5_27B": "http://127.0.0.1:8081/v1"
   };
 
   return {
@@ -32,13 +39,23 @@ export function createLLM(modelId = "llama3-8b") {
     modelName: modelId,
     temperature: 0,
     streaming: true,
-    timeout: 600000, // 10 minute timeout
-    maxTokens: 8192, // Increased limit for long technical docs
+    maxRetries: 0, 
+    maxTokens: 32768,
   };
 
+  // Explicit JSON mode for strict schema models
   const useStrictJson = modelId.toLowerCase().includes("qwen2.5-7b");
   if (useStrictJson) {
-      options.model_kwargs = { response_format: { type: "json_object" } };
+      options.modelKwargs = { response_format: { type: "json_object" } };
+  }
+
+  // Pass thinking budget for Qwen3 models (enforced in vllm-mlx's MLXLanguageModel)
+  if (modelId.toLowerCase().includes("qwen3.5-27b")) {
+      const thinkingBudget = parseInt(process.env.THINKING_BUDGET ?? "2048", 10);
+      options.modelKwargs = {
+          ...options.modelKwargs,
+          thinking_budget: thinkingBudget,
+      };
   }
 
   return new ChatOpenAI(options);

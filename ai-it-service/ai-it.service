@@ -1,0 +1,18 @@
+[Unit]
+Description=AI-IT OpenAI-compatible agent API server
+After=network.target
+
+[Service]
+Type=simple
+User=michael
+WorkingDirectory=/Users/michael/Dev/ai-it
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/Users/michael/Dev/ai-it/ai-it-service/server.out
+StandardError=append:/Users/michael/Dev/ai-it/ai-it-service/server.err
+Environment=HOME=/Users/michael
+Environment=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

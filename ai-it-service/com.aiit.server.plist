@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiit.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>server.js</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/michael/Dev/ai-it</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/michael/Dev/ai-it/ai-it-service/server.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/michael/Dev/ai-it/ai-it-service/server.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/michael</string>
+        <key>THINKING_BUDGET</key>
+        <string>2048</string>
+    </dict>
+</dict>
+</plist>
