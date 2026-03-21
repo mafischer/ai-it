@@ -9,31 +9,25 @@ Extract technical requirements from the USER directive.
 ## Action
 Provide a Requirements Specification.
 
-{{#priorQuestions}}
-## Clarification Context
-You previously asked the USER the following questions:
+{{#hasClarifications}}
+## Clarification History
+The following clarifications were gathered from the USER:
 
----
+{{#clarificationHistory}}
+### Round {{roundNumber}}
+**Questions asked:**
 {{priorQuestions}}
----
 
-The USER responded with:
-
----
+**USER responded:**
 {{userResponse}}
----
 
-Use both the original directive AND the USER's clarifications to produce a complete Requirements Specification.
-{{/priorQuestions}}
+{{/clarificationHistory}}
 
-## Strategy
-If the project is complex, provide requirements in PHASES.
+Incorporate ALL clarifications above into the Requirements Specification.
+{{/hasClarifications}}
 
 ## Exit
 When the ENTIRE specification is done, you MUST end with: "STATUS: REQUIREMENTS_DRAFTED".
-
-## Interim
-If you need to stop early due to length, end with: "STATUS: BA_PHASE_CONTINUE".
 
 ## Directive
 {{directive}}

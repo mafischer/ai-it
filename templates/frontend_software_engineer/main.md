@@ -12,8 +12,22 @@ Provide code/implementation.
 ## Exit
 When done, end with: "STATUS: IMPLEMENTATION_COMPLETE".
 
-## Interim
-If you need to stop early, end with: "STATUS: FSE_PHASE_CONTINUE".
+{{#hasClarifications}}
+## Clarification History
+The following clarifications were gathered:
+
+{{#clarificationHistory}}
+### Round {{roundNumber}}
+**Questions asked:**
+{{priorQuestions}}
+
+**USER responded:**
+{{userResponse}}
+
+{{/clarificationHistory}}
+
+Incorporate ALL clarifications above into your output.
+{{/hasClarifications}}
 
 ## Design
 {{input}}

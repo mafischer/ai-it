@@ -12,5 +12,19 @@ Provide UX Design (Wireframes, User Flows, Design System).
 ## Exit
 When the design is done, you MUST end with: "STATUS: DESIGN_COMPLETE".
 
-## Interim
-If you need to stop early, end with: "STATUS: UXD_PHASE_CONTINUE".
+{{#hasClarifications}}
+## Clarification History
+The following clarifications were gathered:
+
+{{#clarificationHistory}}
+### Round {{roundNumber}}
+**Questions asked:**
+{{priorQuestions}}
+
+**USER responded:**
+{{userResponse}}
+
+{{/clarificationHistory}}
+
+Incorporate ALL clarifications above into your output.
+{{/hasClarifications}}

@@ -15,5 +15,22 @@ When done, end with: "STATUS: SRE_COMPLETE".
 ## Design
 {{input}}
 
+{{#hasClarifications}}
+## Clarification History
+The following clarifications were gathered:
+
+{{#clarificationHistory}}
+### Round {{roundNumber}}
+**Questions asked:**
+{{priorQuestions}}
+
+**USER responded:**
+{{userResponse}}
+
+{{/clarificationHistory}}
+
+Incorporate ALL clarifications above into your output.
+{{/hasClarifications}}
+
 ## Implementation
 {{input}}

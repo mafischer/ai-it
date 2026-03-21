@@ -4,12 +4,10 @@
 You are a Backend Software Engineer (BSE) responsible for implementing code based on the Architect's design.
 
 ## Mission
-Continue implementing code. Here is the implementation so far:
-
-{{self}}
+Your previous response hit the output length limit and was truncated.
 
 ## Action
-Complete the implementation, starting where you left off. DO NOT INCLUDE the implementation so far in your response.
+Please continue exactly where you left off. DO NOT repeat what you have already written, just pick up from the exact sentence or code block where you were cut off.
 
 ## Exit
 When done, end with: "STATUS: IMPLEMENTATION_COMPLETE".

@@ -2,9 +2,8 @@
   "version": "1.0",
 
   "engines": {
-    "vllm-local": {
-      "url": "http://127.0.0.1:8081/v1",
-      "apiKey": "${QWEN3_5_27B_KEY}",
+    "lm-studio": {
+      "url": "http://localhost:1234/v1",
       "capabilities": ["text", "reasoning"]
     },
     "llama-server": {
@@ -15,13 +14,14 @@
   },
 
   "models": {
-    "specialist": { "engine": "vllm-local", "modelId": "qwen3.5-27b" },
+    "specialist": { "engine": "lm-studio", "modelId": "qwen3.5-27b" },
     "router":     { "engine": "llama-server", "modelId": "lfm2-8b" }
   },
 
   "pipeline": {
     "entry": "business_analyst",
-    "question_statuses": ["DIRECTIVE_AMBIGUOUS", "QUESTION"]
+    "question_statuses": ["DIRECTIVE_AMBIGUOUS", "QUESTION"],
+    "maxClarificationRounds": 5
   },
 
   "agents": {
@@ -106,7 +106,6 @@
     "business_analyst": {
       "routes": {
         "REQUIREMENTS_DRAFTED": ["software_architect", "ux_designer"],
-        "BA_PHASE_CONTINUE": "$self",
         "REQUIREMENTS_APPROVED": { "$map_previous": { "software_architect": "backend_software_engineer", "ux_designer": "frontend_software_engineer", "default": "software_architect" } },
         "REQUIREMENTS_AMBIGUOUS": { "$map_previous": { "default": "software_architect" } },
         "DIRECTIVE_CLEAR": "$self",
@@ -119,7 +118,6 @@
     "software_architect": {
       "routes": {
         "DESIGN_COMPLETE": "business_analyst",
-        "ARCHITECT_PHASE_CONTINUE": "$self",
         "DESIGN_SATISFIED": "backend_software_engineer",
         "DESIGN_APPROVED": "backend_software_engineer",
         "QUESTION": "business_analyst",
@@ -132,7 +130,6 @@
     "ux_designer": {
       "routes": {
         "DESIGN_COMPLETE": "business_analyst",
-        "UXD_PHASE_CONTINUE": "$self",
         "DESIGN_APPROVED": "frontend_software_engineer",
         "DESIGN_SATISFIED": "frontend_software_engineer",
         "QUESTION": "business_analyst",
@@ -145,7 +142,6 @@
     "backend_software_engineer": {
       "routes": {
         "IMPLEMENTATION_COMPLETE": "software_architect",
-        "BSE_PHASE_CONTINUE": "$self",
         "IMPLEMENTATION_APPROVED": "quality_engineer",
         "QUESTION": "software_architect",
         "IMPLEMENTATION_CLEAR": "$self",
@@ -157,7 +153,6 @@
     "frontend_software_engineer": {
       "routes": {
         "IMPLEMENTATION_COMPLETE": "ux_designer",
-        "FSE_PHASE_CONTINUE": "$self",
         "IMPLEMENTATION_APPROVED": "quality_engineer",
         "QUESTION": "ux_designer",
         "IMPLEMENTATION_CLEAR": "$self",
@@ -170,7 +165,6 @@
       "routes": {
         "TESTING_COMPLETE": "__end__",
         "TESTS_PASSED": "__end__",
-        "QE_PHASE_CONTINUE": "$self",
         "REJECTED": { "$previous_matching": ["backend_software_engineer", "frontend_software_engineer"], "default": "backend_software_engineer" },
         "QUESTION": { "$previous_matching": ["backend_software_engineer", "frontend_software_engineer"], "default": "backend_software_engineer" },
         "TESTING_CLEAR": "$self",

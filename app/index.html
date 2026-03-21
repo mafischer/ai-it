@@ -72,7 +72,7 @@ const ThreadList = {
               <v-progress-circular v-if="isActive(t.thread_id)" indeterminate size="16" width="2" color="primary" class="mr-2" />
               <v-chip v-if="isActive(t.thread_id)" size="x-small" color="primary" variant="tonal">active</v-chip>
             </div>
-            <div class="text-body-1 mt-1">{{ t.directive }}</div>
+            <div class="text-body-1 mt-1 font-weight-medium">{{ t.title || t.directive }}</div>
             <div class="d-flex align-center mt-2 ga-2 flex-wrap">
               <v-chip size="small" variant="tonal" prepend-icon="mdi-message-outline">{{ t.msgCount }} messages</v-chip>
               <v-chip v-for="a in t.agents" :key="a" size="small" color="primary" variant="outlined">{{ emoji(a) }} {{ agentName(a) }}</v-chip>
@@ -132,9 +132,15 @@ const ThreadDetail = {
         <v-btn v-if="active" color="error" variant="flat" prepend-icon="mdi-stop" @click="abortThread">Abort</v-btn>
       </div>
 
-      <v-chip class="mb-4" variant="tonal" size="small" prepend-icon="mdi-database">
-        {{ messages.length }} messages in latest state
-      </v-chip>
+      <div class="d-flex align-center mb-4">
+        <v-chip variant="tonal" size="small" prepend-icon="mdi-database">
+          {{ messages.length }} messages in latest state
+        </v-chip>
+        <v-spacer></v-spacer>
+        <v-btn size="small" variant="tonal" :prepend-icon="allExpanded ? 'mdi-collapse-all' : 'mdi-expand-all'" @click="toggleAllMessages">
+          {{ allExpanded ? 'Collapse All' : 'Expand All' }}
+        </v-btn>
+      </div>
 
       <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
 
@@ -142,15 +148,32 @@ const ThreadDetail = {
         <v-card class="flex-grow-1"
           :border="m.role === 'user' ? 'success sm' : 'info sm'" elevation="3">
           <v-card-text>
-            <div class="d-flex align-center mb-2">
-              <v-chip :color="m.role === 'user' ? 'success' : 'primary'" variant="flat" size="small" class="mr-2">
-                {{ msgEmoji(m) }} {{ m.name || m.role }}
+            <div class="d-flex align-center mb-2" style="cursor: pointer;" @click="m._msgOpen = m._msgOpen === false ? true : false">
+              <v-chip :color="m.role === 'user' ? 'success' : (m.role === 'system' ? 'warning' : 'primary')" :variant="m.role === 'system' ? 'tonal' : 'flat'" size="small" class="mr-2">
+                {{ msgEmoji(m) }} <template v-if="m.role === 'system'">System prompt to {{ agentName(m.name) }}</template><template v-else>{{ agentName(m.name) || m.role }}</template>
               </v-chip>
+              <v-progress-circular v-if="m._streaming" indeterminate size="16" width="2" color="primary" class="mr-2"></v-progress-circular>
               <v-chip v-if="msgStatus(m)" :color="statusColor(msgStatus(m))" size="x-small" variant="tonal" class="mr-2">
                 {{ msgStatus(m) }}
               </v-chip>
+              <v-spacer></v-spacer>
+              <v-btn icon size="x-small" variant="text" @click.stop="m._msgOpen = m._msgOpen === false ? true : false">
+                <v-icon>{{ m._msgOpen === false ? 'mdi-chevron-down' : 'mdi-chevron-up' }}</v-icon>
+              </v-btn>
             </div>
-            <pre class="text-body-2 msg-content">{{ m.content }}</pre>
+            <div v-show="m._msgOpen !== false">
+              <!-- Thinking section (parsed from <think> tags in content) -->
+              <v-card v-if="m._thinking" variant="outlined" class="mb-2" rounded="lg">
+                <v-card-text class="pa-2">
+                  <div class="d-flex align-center cursor-pointer" @click="m._thinkOpen = !m._thinkOpen; m._userToggledThink = true">
+                    <v-icon size="small" class="mr-2">{{ m._thinkOpen ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
+                    <span class="text-caption text-medium-emphasis">Thinking</span>
+                  </div>
+                  <div v-if="m._thinkOpen" class="md-content mt-2 text-medium-emphasis" style="font-size:0.8rem" v-html="renderMd(m._thinking)"></div>
+                </v-card-text>
+              </v-card>
+              <div class="md-content" v-html="renderMd(m._displayContent || m.content)"></div>
+            </div>
           </v-card-text>
         </v-card>
         <v-btn v-if="!active" rounded="pill" size="small" variant="tonal" color="primary" icon="mdi-skip-backward"
@@ -179,10 +202,38 @@ const ThreadDetail = {
     const activeAgent = ref(null);
     let poll;
 
+    function parseThinking(content) {
+      if (!content) return { thinking: null, display: content };
+      const match = content.match(/<think>([\s\S]*?)<\/think>/);
+      if (match) {
+        return { thinking: match[1].trim(), display: content.replace(/<think>[\s\S]*?<\/think>/, "").replace(/<\/?think>/g, "").trim() };
+      }
+      return { thinking: null, display: content };
+    }
+
+    let isStreaming = false;
+
     async function fetchMessages() {
+      if (isStreaming) return; // Don't clobber state while streaming
       try {
         const r = await fetch("/api/threads/" + threadId + "/messages");
-        if (r.ok) messages.value = await r.json();
+        if (r.ok) {
+          const msgs = await r.json();
+          // Preserve existing reactive state for messages already rendered
+          const existing = new Map(messages.value.map((m, i) => [i, m]));
+          messages.value = msgs.map((m, i) => {
+            const { thinking, display } = parseThinking(m.content);
+            const prev = existing.get(i);
+            // Preserve user-toggled state if content hasn't changed
+            if (prev && prev.content === m.content) {
+              prev._thinking = thinking;
+              prev._displayContent = display;
+              if (prev._msgOpen === undefined) prev._msgOpen = false;
+              return prev;
+            }
+            return { ...m, _thinking: thinking, _displayContent: display, _thinkOpen: false, _msgOpen: false, _streaming: false };
+          });
+        }
       } catch {} finally { loading.value = false; }
     }
 
@@ -198,9 +249,17 @@ const ThreadDetail = {
 
     async function pollAll() { await Promise.all([fetchMessages(), fetchActive()]); }
 
-    function msgEmoji(m) { return EMOJIS[m.name] || (m.role === "user" ? "\u{1F464}" : "\u{1F916}"); }
-    function msgStatus(m) { return extractStatus(m.content); }
+    function msgEmoji(m) { return m.role === "system" ? "➡️" : (EMOJIS[m.name] || (m.role === "user" ? "\u{1F464}" : "\u{1F916}")); }
+    function msgStatus(m) { return m.role === "system" ? "" : extractStatus(m.content); }
     function emoji(id) { return EMOJIS[id] || "\u{1F916}"; }
+    function renderMd(text) { if (!text) return ""; try { return marked.parse(text, { breaks: true }); } catch { return text; } }
+
+    const allExpanded = computed(() => messages.value.length > 0 && messages.value.every(m => m._msgOpen !== false));
+
+    function toggleAllMessages() {
+      const targetState = !allExpanded.value;
+      messages.value.forEach(m => m._msgOpen = targetState);
+    }
 
     async function rewind(i) {
       if (!confirm("Rewind to message " + i + " and re-run?")) return;
@@ -221,10 +280,90 @@ const ThreadDetail = {
       pollAll();
     }
 
-    onMounted(() => { pollAll(); poll = setInterval(pollAll, 2000); });
-    onUnmounted(() => clearInterval(poll));
+    let streamReader = null;
 
-    return { threadId, messages, loading, active, activeAgent, msgEmoji, msgStatus, emoji, agentName, statusColor, rewind, abortThread };
+    async function connectStream() {
+      isStreaming = true;
+      try {
+        const resp = await fetch("/api/threads/" + threadId + "/stream");
+        if (!resp.ok) { isStreaming = false; return; }
+        const reader = resp.body.getReader();
+        streamReader = reader;
+        const dec = new TextDecoder();
+        let buffer = "";
+        let currentAgent = null;
+        let thinkBuf = "", contentBuf = "", inThink = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += dec.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+            try {
+              const data = JSON.parse(line.slice(6));
+              const deltaObj = data.choices?.[0]?.delta || {};
+
+              // System prompt from prompt node
+              if (deltaObj.system_prompt) {
+                const agentId = deltaObj.agent || "";
+                const exists = messages.value.some(m => m.type === "prompt" && m.name === agentId);
+                if (!exists) {
+                  messages.value.push({ role: "system", name: agentId, content: deltaObj.system_prompt, type: "prompt", _thinking: null, _displayContent: deltaObj.system_prompt, _thinkOpen: false });
+                }
+                // Add streaming agent message
+                currentAgent = agentId;
+                inThink = false; thinkBuf = ""; contentBuf = "";
+                const agentExists = messages.value.some(m => m.role === "assistant" && m.name === agentId && m.type !== "prompt");
+                if (!agentExists) {
+                  messages.value.push({ role: "assistant", name: agentId, content: "", _thinking: null, _displayContent: "", _thinkOpen: true, _streaming: true });
+                }
+                continue;
+              }
+
+              const delta = deltaObj.content || "";
+              if (!delta) continue;
+
+              // Find or create the streaming message
+              let streamMsg = messages.value.findLast(m => m._streaming);
+              if (!streamMsg && currentAgent) {
+                streamMsg = { role: "assistant", name: currentAgent, content: "", _thinking: null, _displayContent: "", _thinkOpen: true, _streaming: true };
+                messages.value.push(streamMsg);
+              }
+              if (!streamMsg) continue;
+
+              for (let i = 0; i < delta.length; i++) {
+                const remaining = delta.slice(i);
+                if (!inThink && remaining.startsWith("<think>")) { inThink = true; if (!streamMsg._userToggledThink) streamMsg._thinkOpen = true; i += 6; continue; }
+                if (inThink && remaining.startsWith("</think>")) { inThink = false; streamMsg._thinking = thinkBuf; if (!streamMsg._userToggledThink) streamMsg._thinkOpen = false; i += 7; continue; }
+                if (inThink) { thinkBuf += delta[i]; streamMsg._thinking = thinkBuf; }
+                else { contentBuf += delta[i]; streamMsg._displayContent = contentBuf; streamMsg.content = contentBuf; }
+              }
+            } catch {}
+          }
+        }
+      } catch {} finally {
+        isStreaming = false;
+        // Finalize any streaming messages
+        messages.value.forEach(m => { if (m._streaming) m._streaming = false; });
+        fetchMessages(); // Load final state from DB
+      }
+    }
+
+    onMounted(async () => {
+      await pollAll();
+      if (active.value) connectStream();
+      poll = setInterval(pollAll, 2000);
+    });
+    onUnmounted(() => {
+      clearInterval(poll);
+      if (streamReader) { try { streamReader.cancel(); } catch {} }
+    });
+
+    return { threadId, messages, loading, active, activeAgent, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, abortThread, allExpanded, toggleAllMessages };
   }
 };
 

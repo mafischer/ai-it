@@ -12,7 +12,8 @@ restart_service() {
     echo "  started"
 }
 
-restart_service com.aiit.vllm-mlx
+# vllm-mlx is disabled as we are using lm-studio
+# restart_service com.aiit.vllm-mlx
 restart_service com.aiit.server
 
 echo "Restarting open-webui..."
@@ -21,4 +22,4 @@ echo "  started"
 
 echo ""
 echo "Done. Monitor with:"
-echo "  tail -f ~/.vllm-mlx/vllm.err"
+echo "  tail -f ai-it-service/server.out"

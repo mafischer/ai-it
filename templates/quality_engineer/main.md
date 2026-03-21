@@ -18,5 +18,22 @@ If you need more time, end with: "STATUS: QE_PHASE_CONTINUE".
 ## Implementation
 {{input}}
 
+{{#hasClarifications}}
+## Clarification History
+The following clarifications were gathered:
+
+{{#clarificationHistory}}
+### Round {{roundNumber}}
+**Questions asked:**
+{{priorQuestions}}
+
+**USER responded:**
+{{userResponse}}
+
+{{/clarificationHistory}}
+
+Incorporate ALL clarifications above into your output.
+{{/hasClarifications}}
+
 ## Requirements
 {{input}}
