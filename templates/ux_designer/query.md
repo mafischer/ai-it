@@ -10,10 +10,10 @@ Ask the Business Analyst any questions you need to clarify requirements.
 Provide a list of questions to the Business Analyst only if there is ambiguity in the requirements that affects your design.
 
 ## Feedback
-When done, end with: "STATUS: DESIGN_CLEAR".
+When done, end with: "STATUS: REQUIREMENTS_CLEAR".
 
 ## Exit
-If you provided questions to the Business Analyst, end with "STATUS: DESIGN_AMBIGUOUS".
+If you provided questions to the Business Analyst, end with "STATUS: REQUIREMENTS_AMBIGUOUS".
 
 {{#hasClarifications}}
 ## Clarification History
@@ -24,12 +24,17 @@ The following clarification rounds have occurred:
 **Questions asked:**
 {{priorQuestions}}
 
-**USER responded:**
+**{{responder}} responded:**
 {{userResponse}}
 
 {{/clarificationHistory}}
 
-Review the full history above. If all ambiguities are now resolved, end with the appropriate CLEAR status. If further clarification is still needed, ask only NEW questions (do not repeat questions already answered) and end with the appropriate AMBIGUOUS status.
+{{#clarificationsExhausted}}
+**IMPORTANT: This is round {{clarificationRound}} of {{maxClarificationRounds}}. You have exhausted your allotment of clarification rounds. You are NOT allowed to ask further questions. You MUST end with "STATUS: REQUIREMENTS_CLEAR" and proceed with the information you have.**
+{{/clarificationsExhausted}}
+{{^clarificationsExhausted}}
+You have used {{clarificationRound}} of {{maxClarificationRounds}} clarification rounds ({{clarificationsRemaining}} remaining). Review the full history above. If all ambiguities are now resolved, end with "STATUS: REQUIREMENTS_CLEAR". If further clarification is still needed, ask only NEW questions (do not repeat questions already answered) and end with "STATUS: REQUIREMENTS_AMBIGUOUS".
+{{/clarificationsExhausted}}
 {{/hasClarifications}}
 
 ## Requirements

@@ -31,3 +31,10 @@ Incorporate ALL clarifications above into your output.
 
 ## Requirements
 {{input}}
+
+{{#self}}
+## Your Previous Design
+{{self}}
+
+If this is a revision, update your design based on the feedback provided in the requirements or clarification history.
+{{/self}}

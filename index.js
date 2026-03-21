@@ -1,3 +1,4 @@
+import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { StateGraph, MessagesAnnotation, Annotation, START, END } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { createLLM } from "./src/utils/llm.js";
@@ -27,15 +28,14 @@ const routerLLM = llms[config.router.model];
 
 function extractStatus(content) {
     if (!content) return null;
-    // Strip <think> blocks to avoid matching STATUS tokens from reasoning
-    const cleaned = content.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "");
+    const cleaned = cleanSpecialistOutput(content);
     const matches = [...cleaned.matchAll(/STATUS:\s*([A-Z_]+)/g)];
     return matches.length ? matches[matches.length - 1][1] : null;
 }
 
 function cleanSpecialistOutput(content) {
     if (typeof content !== 'string') return String(content || "");
-    return content.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "").trim();
+    return content.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "").replace(/<\/?think>/g, "").trim();
 }
 
 function getMsgName(m) {
@@ -62,12 +62,11 @@ function getPromptForNode(state, nodeName) {
     if (!prompts.length) return `You are ${nodeName}.`;
     const hasPrompt = (v) => prompts.includes(v);
 
-    const selfLastContent = msgs.length ? getMsgContent(msgs[msgs.length - 1]) : "";
-    const otherLastContent = lastMsg ? getMsgContent(lastMsg) : "";
+    const selfLastContent = msgs.length ? cleanSpecialistOutput(getMsgContent(msgs[msgs.length - 1])) : "";
+    const otherLastContent = lastMsg ? cleanSpecialistOutput(getMsgContent(lastMsg)) : "";
 
     const isUserReply = getMsgRole(lastMsg) === "user";
     const questionStatuses = getPipeline().question_statuses || [];
-    const stripThink = (s) => String(s || "").replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "").trim();
 
     // Build full clarification history — all Q&A rounds between this agent and the user
     let clarificationHistory = null;
@@ -80,13 +79,14 @@ function getPromptForNode(state, nodeName) {
             const content = getMsgContent(m);
             const status = extractStatus(content);
             if (questionStatuses.includes(status) || status === "QUESTION") {
-                // This agent asked questions — find the next user reply
-                const nextUser = allMsgs.slice(i + 1).find(n => getMsgRole(n) === "user");
-                if (nextUser) {
+                // This agent asked questions — find the next reply from someone else
+                const nextReply = allMsgs.slice(i + 1).find(n => getMsgName(n) !== nodeName && !getMsgName(n).endsWith("__prompt"));
+                if (nextReply) {
                     rounds.push({ 
                         roundNumber: roundCounter++, 
-                        priorQuestions: stripThink(content), 
-                        userResponse: getMsgContent(nextUser)
+                        priorQuestions: cleanSpecialistOutput(content), 
+                        userResponse: getMsgContent(nextReply),
+                        responder: getMsgName(nextReply) || getMsgRole(nextReply)
                     });
                 }
             }
@@ -113,7 +113,7 @@ function getPromptForNode(state, nodeName) {
     const last = {};
     for (const agentId of getActiveAgents()) {
         const agentMsgs = state.messages.filter(m => m.name === agentId);
-        last[agentId] = agentMsgs.length ? agentMsgs[agentMsgs.length - 1].content : "";
+        last[agentId] = agentMsgs.length ? cleanSpecialistOutput(agentMsgs[agentMsgs.length - 1].content) : "";
     }
 
     const values = {
@@ -154,12 +154,18 @@ function getPromptForNode(state, nodeName) {
         return renderPrompt(nodeName, "main", values);
     }
 
-    // 4. Run query to clarify ambiguities unless already clarified
+    // 4. Run query to clarify ambiguities unless already clarified or exhausted
     if (hasPrompt("query")) {
-        const isClarified = lastSelfStatus && (lastSelfStatus.endsWith("_CLEAR") || lastSelfStatus.endsWith("_APPROVED"));
-        if (!isClarified) {
-            // Query template handles both initial questions and follow-up clarifications
-            // (priorQuestions/userResponse are injected when available)
+        // We consider the query phase "done" if we've already reached a CLEAR, APPROVED, or DRAFTED state once.
+        const isPastQueryPhase = lastSelfStatus && (
+            lastSelfStatus.endsWith("_CLEAR") || 
+            lastSelfStatus.endsWith("_APPROVED") || 
+            lastSelfStatus.endsWith("_DRAFTED")
+        );
+        
+        // If the user just replied, stay in query mode to potentially ask follow-ups,
+        // unless we've already exhausted our clarification rounds or moved past the query phase.
+        if (!values.clarificationsExhausted && !isPastQueryPhase) {
             return renderPrompt(nodeName, "query", values);
         }
     }
@@ -170,7 +176,7 @@ function getPromptForNode(state, nodeName) {
 // Prompt node: generates the system prompt and commits it to state immediately
 function promptNode(nodeName, state) {
     const systemPromptStr = getPromptForNode(state, nodeName);
-    return { messages: [{ role: "system", name: `${nodeName}__prompt`, content: systemPromptStr }] };
+    return { messages: [new SystemMessage({ content: systemPromptStr, name: `${nodeName}__prompt`, additional_kwargs: { timestamp: Date.now() } })] };
 }
 
 // Agent node: reads the prompt from state, calls the LLM, and auto-continues on truncation.
@@ -192,33 +198,39 @@ async function agentNode(nodeName, state, nodeConfig) {
     let accumulated = "";
     let messagesToPass = [
         { role: "system", content: systemPromptStr },
-        { role: "user", content: `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${getMsgName(lastMsg) || lastMsg.role || "USER"}]:\n${getMsgContent(lastMsg)}` }
+        { role: "user", content: `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${getMsgName(lastMsg) || lastMsg.role || "USER"}]:\n${cleanSpecialistOutput(getMsgContent(lastMsg))}` }
     ];
 
     for (let attempt = 0; attempt <= MAX_CONTINUATIONS; attempt++) {
-        const response = await llm.invoke(messagesToPass, { signal: nodeConfig?.signal });
-        const chunk = typeof response.content === 'string' ? response.content.trim() : String(response.content || "");
-        accumulated += (accumulated && !accumulated.endsWith("\n") ? "\n" : "") + chunk;
+        let chunkContent = "";
+        const stream = await llm.stream(messagesToPass, nodeConfig);
+        for await (const chunk of stream) {
+            const text = typeof chunk.content === 'string' ? chunk.content : String(chunk.content || "");
+            chunkContent += text;
+        }
+        
+        chunkContent = chunkContent.trim();
+        accumulated += (accumulated && !accumulated.endsWith("\n") ? "\n" : "") + chunkContent;
 
         // Check if the response has a STATUS token (after stripping <think> blocks)
         const status = extractStatus(accumulated);
         if (status) {
             // Complete response — commit the merged result
-            return { messages: [{ role: "assistant", name: nodeName, content: accumulated }] };
+            return { messages: [new AIMessage({ content: accumulated, name: nodeName, additional_kwargs: { timestamp: Date.now() } })] };
         }
 
         if (attempt === MAX_CONTINUATIONS) {
             // Max continuations reached — commit what we have
             console.error(`[AGENT] ${nodeName}: max continuations (${MAX_CONTINUATIONS}) reached without STATUS token`);
-            return { messages: [{ role: "assistant", name: nodeName, content: accumulated }] };
+            return { messages: [new AIMessage({ content: accumulated, name: nodeName, additional_kwargs: { timestamp: Date.now() } })] };
         }
 
         // No STATUS token — truncated. Continue with accumulated context.
         console.error(`[AGENT] ${nodeName}: no STATUS token, auto-continuing (attempt ${attempt + 1}/${MAX_CONTINUATIONS})`);
         messagesToPass = [
             { role: "system", content: systemPromptStr },
-            { role: "user", content: `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${getMsgName(lastMsg) || lastMsg.role || "USER"}]:\n${getMsgContent(lastMsg)}` },
-            { role: "assistant", content: accumulated },
+            { role: "user", content: `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${getMsgName(lastMsg) || lastMsg.role || "USER"}]:\n${cleanSpecialistOutput(getMsgContent(lastMsg))}` },
+            { role: "assistant", content: cleanSpecialistOutput(accumulated) },
             { role: "user", content: "Your previous output was truncated due to length limits. Please continue EXACTLY where you left off. Do not repeat any content already written. When finished, end with the appropriate STATUS token." }
         ];
     }
@@ -266,6 +278,10 @@ async function fallbackRouter(state, currentAgent) {
 }
 
 // --- Config-driven routing ---
+const syncGroups = [
+    { name: "design_sync", members: ["software_architect", "ux_designer"], parent: "business_analyst" }
+];
+
 function buildRouteFunction(agentId) {
     const routingDef = getRouting(agentId);
     if (!routingDef) return (state) => fallbackRouter(state, agentId);
@@ -284,7 +300,19 @@ function buildRouteFunction(agentId) {
         const target = routingDef.routes[status];
         if (target === undefined) return fallbackRouter(state, agentId);
 
-        return resolveTarget(target, agentId, state);
+        const resolved = resolveTarget(target, agentId, state);
+
+        // If it routes to itself, let it loop without syncing.
+        if (resolved.length === 1 && resolved[0] === agentId) {
+            return resolved;
+        }
+
+        const group = syncGroups.find(p => p.members.includes(agentId));
+        if (group) {
+            return [`sync_${group.name}`];
+        }
+
+        return resolved;
     };
 }
 
@@ -312,10 +340,7 @@ function routeFromStart(state) {
     
     if (role === "system" && name.endsWith("__prompt")) {
         // Rewound to a system prompt. Route directly to the corresponding agent.
-        // Returning the agent name causes appendPromptSuffix to append __prompt,
-        // but START edges don't allow skipping the prompt node if appendPromptSuffix is applied to everything.
-        // Wait, if we return the agent name, appendPromptSuffix adds __prompt, so it just runs the prompt node AGAIN, replacing the one we just injected. This is fine and safe.
-        return [name.replace("__prompt", "")];
+        return [`${name.replace("__prompt", "")}:skip_prompt`];
     }
 
     if (role === "assistant" && name && !name.endsWith("__prompt")) {
@@ -344,10 +369,16 @@ for (const agentId of activeAgents) {
     workflow.addEdge(promptId, agentId);
 }
 
+// Add sync nodes for parallel groups
+for (const group of syncGroups) {
+    workflow.addNode(`sync_${group.name}`, (state) => ({}));
+}
+
 function appendPromptSuffix(targets) {
     if (!Array.isArray(targets)) return targets;
     return targets.map(t => {
         if (t === END) return END;
+        if (typeof t === "string" && t.endsWith(":skip_prompt")) return t.replace(":skip_prompt", "");
         if (typeof t === "string" && activeAgents.includes(t)) return `${t}_prompt`;
         return t;
     });
@@ -364,7 +395,72 @@ for (const agentId of activeAgents) {
     const routeFn = buildRouteFunction(agentId);
     workflow.addConditionalEdges(agentId, async (state) => {
         const targets = await routeFn(state);
+        if (targets.length === 1 && targets[0].startsWith("sync_")) {
+            return targets; // Route directly to sync node, no prompt suffix
+        }
         return appendPromptSuffix(targets);
+    });
+}
+
+// Add conditional edges from sync nodes to evaluate combined state
+for (const group of syncGroups) {
+    workflow.addConditionalEdges(`sync_${group.name}`, (state) => {
+        const msgs = state.messages.filter(m => !getMsgName(m).endsWith("__prompt"));
+        let parentIndex = -1;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            if (getMsgName(msgs[i]) === group.parent) {
+                parentIndex = i;
+                break;
+            }
+        }
+
+        if (parentIndex === -1) return [END];
+
+        const memberMsgs = {};
+        group.members.forEach(m => memberMsgs[m] = null);
+
+        for (let i = parentIndex + 1; i < msgs.length; i++) {
+            const name = getMsgName(msgs[i]);
+            if (group.members.includes(name)) {
+                memberMsgs[name] = msgs[i];
+            }
+        }
+
+        const allFinished = Object.values(memberMsgs).every(msg => msg !== null);
+        if (!allFinished) {
+            console.log(`[SYNC]: Waiting for all members of ${group.name} to finish.`);
+            return [];
+        }
+
+        console.log(`[SYNC]: All members of ${group.name} finished. Evaluating combined routing.`);
+
+        const allTargets = new Set();
+        let requiresParentClarification = false;
+
+        for (const member of group.members) {
+            const msg = memberMsgs[member];
+            const status = extractStatus(getMsgContent(msg));
+            const memberRoutingDef = getRouting(member);
+            const targetToken = memberRoutingDef?.routes[status] || "$self";
+            const resolved = resolveTarget(targetToken, member, state);
+            
+            for (const t of resolved) {
+                if (t === member) continue;
+                allTargets.add(t);
+                if (t === group.parent) {
+                    requiresParentClarification = true;
+                }
+            }
+        }
+
+        if (requiresParentClarification) {
+            console.log(`[SYNC]: ${group.name} needs parent review. Routing to ${group.parent}.`);
+            return appendPromptSuffix([group.parent]);
+        }
+
+        const finalTargets = Array.from(allTargets);
+        console.log(`[SYNC]: ${group.name} proceeding to ${finalTargets.join(", ")}.`);
+        return appendPromptSuffix(finalTargets);
     });
 }
 

@@ -16,7 +16,7 @@
 <script src="chat.js"></script>
 
 <script>
-const { createApp, ref, computed, onMounted, onUnmounted, watch } = Vue;
+const { createApp, ref, reactive, triggerRef, computed, onMounted, onUnmounted, watch } = Vue;
 const { createRouter, createWebHashHistory, useRouter, useRoute } = VueRouter;
 const { createVuetify } = Vuetify;
 
@@ -64,22 +64,27 @@ const ThreadList = {
         <div class="text-body-1 mt-3 text-grey">No conversations yet.</div>
       </v-card>
 
-      <div v-for="t in threads" :key="t.thread_id" class="d-flex align-center ga-3 mb-3">
-        <v-card class="flex-grow-1" :border="isActive(t.thread_id) ? 'primary md' : ''" elevation="3" hover @click="$router.push('/admin/thread/' + t.thread_id)">
-          <v-card-text>
-            <div class="d-flex align-center">
-              <code class="text-caption text-medium-emphasis mr-3">{{ t.thread_id }}</code>
-              <v-progress-circular v-if="isActive(t.thread_id)" indeterminate size="16" width="2" color="primary" class="mr-2" />
-              <v-chip v-if="isActive(t.thread_id)" size="x-small" color="primary" variant="tonal">active</v-chip>
+      <div v-for="t in threads" :key="t.thread_id" class="mb-3">
+        <v-card class="w-100" :border="isActive(t.thread_id) ? 'primary md' : ''" elevation="3" hover @click="$router.push('/admin/thread/' + t.thread_id)">
+          <div class="d-flex flex-row">
+            <v-card-text class="flex-grow-1">
+              <div class="d-flex align-center">
+                <code class="text-caption text-medium-emphasis mr-3">{{ t.thread_id }}</code>
+                <v-progress-circular v-if="isActive(t.thread_id)" indeterminate size="16" width="2" color="primary" class="mr-2" />
+                <v-chip v-if="isActive(t.thread_id)" size="x-small" color="primary" variant="tonal">active</v-chip>
+              </div>
+              <div class="text-body-1 mt-1 font-weight-medium">{{ t.title || t.directive }}</div>
+              <div class="d-flex align-center mt-2 ga-2 flex-wrap">
+                <v-chip size="small" variant="tonal" prepend-icon="mdi-message-outline">{{ t.msgCount }} messages</v-chip>
+                <v-chip v-for="a in t.agents" :key="a" size="small" color="primary" variant="outlined">{{ emoji(a) }} {{ agentName(a) }}</v-chip>
+              </div>
+            </v-card-text>
+            <div class="pa-3 d-flex flex-column justify-center align-center ga-2 border-s">
+               <v-btn size="small" variant="tonal" color="primary" icon="mdi-export" title="Export" @click.stop="exportThread(t.thread_id)" />
+               <v-btn size="small" variant="tonal" color="error" icon="mdi-delete" title="Delete" @click.stop="deleteThread(t.thread_id)" />
             </div>
-            <div class="text-body-1 mt-1 font-weight-medium">{{ t.title || t.directive }}</div>
-            <div class="d-flex align-center mt-2 ga-2 flex-wrap">
-              <v-chip size="small" variant="tonal" prepend-icon="mdi-message-outline">{{ t.msgCount }} messages</v-chip>
-              <v-chip v-for="a in t.agents" :key="a" size="small" color="primary" variant="outlined">{{ emoji(a) }} {{ agentName(a) }}</v-chip>
-            </div>
-        </v-card-text>
+          </div>
         </v-card>
-        <v-btn rounded="pill" size="small" variant="tonal" color="error" icon="mdi-delete" @click.stop="deleteThread(t.thread_id)" />
       </div>
     </v-container>
   `,
@@ -100,6 +105,103 @@ const ThreadList = {
     function isActive(tid) { return activeIds.value.includes(tid); }
     function emoji(id) { return EMOJIS[id] || "\u{1F916}"; }
 
+    async function exportThread(threadId) {
+      try {
+        const r = await fetch("/api/threads/" + threadId + "/messages");
+        if (!r.ok) return;
+        const msgs = await r.json();
+        
+        const t = threads.value.find(th => th.thread_id === threadId);
+        let displayName = threadId;
+        if (t) {
+          displayName = t.title || t.directive || threadId;
+          if (displayName.length > 50) displayName = displayName.slice(0, 50) + "...";
+        }
+        const safeName = displayName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+
+        let html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Export Thread: ${displayName}</title>
+<link href="https://cdn.jsdelivr.net/npm/vuetify@3.7.6/dist/vuetify.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css" rel="stylesheet">
+<style>
+  body { background-color: #121212; color: #fff; font-family: Roboto, sans-serif; padding: 20px; }
+  .chat-container { max-width: 900px; margin: 0 auto; width: 100%; }
+  .msg-row { display: flex; margin-bottom: 20px; flex-direction: column; }
+  .msg-row.user { align-items: flex-end; }
+  .msg-row.agent { align-items: flex-start; }
+  .msg-meta { font-size: 0.75rem; color: #aaa; margin-bottom: 4px; }
+  .msg-card { padding: 12px; border-radius: 8px; max-width: 80%; line-height: 1.6; }
+  .msg-row.user .msg-card { background-color: #2b3b4e; border: 1px solid #1976D2; }
+  .msg-row.agent .msg-card { background-color: #1e1e1e; border: 1px solid #424242; }
+  .agent-badge { display: inline-flex; align-items: center; background: #1976D2; color: #fff; padding: 2px 8px; border-radius: 12px; font-size: 0.85rem; margin-bottom: 8px; }
+  pre { background: #000; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; font-size: 0.85rem; }
+  code { font-family: monospace; }
+  a { color: #64B5F6; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .think-block { margin-bottom: 12px; font-size: 0.85rem; color: #aaa; }
+  .think-summary { cursor: pointer; user-select: none; }
+  .think-content { padding-top: 8px; border-left: 2px solid #555; padding-left: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="chat-container">
+  <div style="margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid #333;">
+    <h2>Thread: ${displayName}</h2>
+  </div>
+`;
+
+        for (const m of msgs) {
+          const isUser = m.role === 'user';
+          if (m.type === 'prompt') continue;
+          
+          const name = m.name || m.role;
+          const display = isUser ? 'User' : agentName(name);
+          const emojiIcon = isUser ? '👤' : emoji(name);
+          const content = m.content || "";
+          
+          let thinking = null, displayContent = content;
+          const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
+          if (thinkMatch) {
+            thinking = thinkMatch[1].trim();
+            displayContent = content.replace(/<think>[\s\S]*?<\/think>/, '').trim();
+          }
+
+          let rendered = marked.parse(displayContent, { breaks: true });
+          let thinkRendered = thinking ? marked.parse(thinking, { breaks: true }) : '';
+
+          let ts = m.timestamp ? new Date(m.timestamp) : new Date();
+
+          html += `
+  <div class="msg-row ${isUser ? 'user' : 'agent'}">
+    <div class="msg-meta">${ts.toLocaleString()}</div>
+    <div class="msg-card">
+      ${!isUser ? `<div class="agent-badge">${emojiIcon} ${display}</div>` : ''}
+      ${thinking ? `<details class="think-block"><summary class="think-summary">Thinking Process</summary><div class="think-content">${thinkRendered}</div></details>` : ''}
+      <div class="md-content">${rendered}</div>
+    </div>
+  </div>`;
+        }
+
+        html += `</div></body></html>`;
+
+        const blob = new Blob([html], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `chat_${safeName}.html`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        console.error("Export failed", e);
+        alert("Failed to export thread.");
+      }
+    }
+
     async function deleteThread(tid) {
       if (!confirm("Delete this conversation?")) return;
       await fetch("/api/threads/" + tid, { method: "DELETE" });
@@ -115,7 +217,7 @@ const ThreadList = {
     onMounted(() => { fetchData(); poll = setInterval(fetchData, 3000); });
     onUnmounted(() => clearInterval(poll));
 
-    return { threads, loading, isActive, emoji, agentName, deleteThread, deleteAll };
+    return { threads, loading, isActive, emoji, agentName, exportThread, deleteThread, deleteAll };
   }
 };
 
@@ -144,8 +246,8 @@ const ThreadDetail = {
 
       <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
 
-      <div v-for="(m, i) in messages" :key="i" class="d-flex align-center ga-3 mb-3">
-        <v-card class="flex-grow-1"
+      <div v-for="(m, i) in messages" :key="i" class="mb-3">
+        <v-card class="w-100"
           :border="m.role === 'user' ? 'success sm' : 'info sm'" elevation="3">
           <v-card-text>
             <div class="d-flex align-center mb-2" style="cursor: pointer;" @click="m._msgOpen = m._msgOpen === false ? true : false">
@@ -157,6 +259,12 @@ const ThreadDetail = {
                 {{ msgStatus(m) }}
               </v-chip>
               <v-spacer></v-spacer>
+              <v-btn icon size="x-small" variant="text" color="primary" @click.stop="openEdit(i)" title="Edit and restart" class="mr-1">
+                <v-icon>mdi-pencil</v-icon>
+              </v-btn>
+              <v-btn icon size="x-small" variant="text" color="primary" @click.stop="rewind(i)" title="Rewind to this point" class="mr-1">
+                <v-icon>mdi-skip-backward</v-icon>
+              </v-btn>
               <v-btn icon size="x-small" variant="text" @click.stop="m._msgOpen = m._msgOpen === false ? true : false">
                 <v-icon>{{ m._msgOpen === false ? 'mdi-chevron-down' : 'mdi-chevron-up' }}</v-icon>
               </v-btn>
@@ -176,8 +284,6 @@ const ThreadDetail = {
             </div>
           </v-card-text>
         </v-card>
-        <v-btn v-if="!active" rounded="pill" size="small" variant="tonal" color="primary" icon="mdi-skip-backward"
-          @click="rewind(i)" title="Rewind to this point" />
       </div>
 
       <!-- Skeleton for active processing -->
@@ -191,6 +297,33 @@ const ThreadDetail = {
           <v-skeleton-loader type="paragraph" />
         </v-card-text>
       </v-card>
+
+      <!-- Edit Dialog -->
+      <v-dialog v-model="editDialogOpen" max-width="800px" persistent>
+        <v-card>
+          <v-card-title class="d-flex align-center">
+            <span>Edit Message</span>
+            <v-spacer></v-spacer>
+            <v-btn icon="mdi-close" variant="text" @click="editDialogOpen = false"></v-btn>
+          </v-card-title>
+          <v-card-text>
+            <v-textarea
+              v-model="editContent"
+              label="Message Content"
+              rows="15"
+              auto-grow
+              variant="outlined"
+              class="font-monospace"
+              style="font-size: 0.9rem"
+            ></v-textarea>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer></v-spacer>
+            <v-btn variant="text" @click="editDialogOpen = false">Cancel</v-btn>
+            <v-btn color="primary" variant="flat" @click="saveEdit">Save & Restart</v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
     </v-container>
   `,
   setup() {
@@ -200,6 +333,9 @@ const ThreadDetail = {
     const loading = ref(true);
     const active = ref(false);
     const activeAgent = ref(null);
+    const editDialogOpen = ref(false);
+    const editContent = ref("");
+    const editIndex = ref(-1);
     let poll;
 
     function parseThinking(content) {
@@ -231,7 +367,7 @@ const ThreadDetail = {
               if (prev._msgOpen === undefined) prev._msgOpen = false;
               return prev;
             }
-            return { ...m, _thinking: thinking, _displayContent: display, _thinkOpen: false, _msgOpen: false, _streaming: false };
+            return { ...m, _thinking: thinking, _displayContent: display, _thinkOpen: false, _msgOpen: false, _streaming: false, _timestamp: m.timestamp ? new Date(m.timestamp) : new Date() };
           });
         }
       } catch {} finally { loading.value = false; }
@@ -261,6 +397,24 @@ const ThreadDetail = {
       messages.value.forEach(m => m._msgOpen = targetState);
     }
 
+    function openEdit(i) {
+      editIndex.value = i;
+      editContent.value = messages.value[i].content;
+      editDialogOpen.value = true;
+    }
+
+    async function saveEdit() {
+      if (editIndex.value === -1) return;
+      const r = await fetch("/api/threads/" + threadId + "/rewind", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messageIndex: editIndex.value, newContent: editContent.value })
+      });
+      const d = await r.json();
+      if (d.error) alert(d.error);
+      editDialogOpen.value = false;
+      pollAll();
+    }
+
     async function rewind(i) {
       if (!confirm("Rewind to message " + i + " and re-run?")) return;
       const r = await fetch("/api/threads/" + threadId + "/rewind", {
@@ -274,27 +428,95 @@ const ThreadDetail = {
 
     async function abortThread() {
       if (!confirm("Abort active workflow?")) return;
+      if (currentStreamController) currentStreamController.abort();
       const r = await fetch("/api/threads/" + threadId + "/abort", { method: "POST" });
       const d = await r.json();
       alert(d.message || d.error);
       pollAll();
     }
 
-    let streamReader = null;
+    let currentStreamController = null;
+
+    const activeStreamStates = {};
+
+    function getStreamState(agentId, forceNew = false) {
+      if (!activeStreamStates[agentId]) {
+        let streamMsg = forceNew ? null : messages.value.findLast(m => m.role === "assistant" && m.name === agentId && m.type !== "prompt");
+        if (!streamMsg) {
+          streamMsg = reactive({ role: "assistant", name: agentId, content: "", _thinking: null, _displayContent: "", _thinkOpen: true, _streaming: true });
+          messages.value.push(streamMsg);
+        } else {
+          streamMsg._streaming = true;
+        }
+        activeStreamStates[agentId] = {
+          msg: streamMsg,
+          inThink: !!streamMsg._thinking,
+          thinkBuf: streamMsg._thinking || "",
+          contentBuf: streamMsg._displayContent || ""
+        };
+      }
+      return activeStreamStates[agentId];
+    }
+
+    function processStreamDelta(deltaObj, choiceObj) {
+      const agentId = deltaObj.agent || "";
+      
+      if (deltaObj.system_prompt) {
+        if (activeStreamStates[agentId]) {
+          activeStreamStates[agentId].msg._streaming = false;
+          delete activeStreamStates[agentId];
+        }
+
+        const exists = messages.value.some(m => m.type === "prompt" && m.name === agentId && m.content === deltaObj.system_prompt);
+        if (!exists) {
+          messages.value.push(reactive({ role: "system", name: agentId, content: deltaObj.system_prompt, type: "prompt", _thinking: null, _displayContent: deltaObj.system_prompt, _thinkOpen: false }));
+          triggerRef(messages);
+        }
+        
+        getStreamState(agentId, true);
+        return;
+      }
+
+      if (choiceObj?.finish_reason === "stop" && agentId) {
+        if (activeStreamStates[agentId]) {
+          activeStreamStates[agentId].msg._streaming = false;
+          delete activeStreamStates[agentId];
+        }
+        return;
+      }
+
+      const delta = deltaObj.content || "";
+      if (!delta) return;
+
+      const state = getStreamState(agentId);
+      state.msg._streaming = true;
+
+      for (let i = 0; i < delta.length; i++) {
+        const remaining = delta.slice(i);
+        if (!state.inThink && remaining.startsWith("<think>")) { state.inThink = true; if (!state.msg._userToggledThink) state.msg._thinkOpen = true; i += 6; continue; }
+        if (state.inThink && remaining.startsWith("</think>")) { state.inThink = false; state.msg._thinking = state.thinkBuf; if (!state.msg._userToggledThink) state.msg._thinkOpen = false; i += 7; continue; }
+        if (state.inThink) { state.thinkBuf += delta[i]; state.msg._thinking = state.thinkBuf; }
+        else { state.contentBuf += delta[i]; state.msg._displayContent = state.contentBuf; state.msg.content = state.contentBuf; }
+      }
+    }
 
     async function connectStream() {
+      if (isStreaming && currentStreamController) return;
       isStreaming = true;
+      
+      if (currentStreamController) currentStreamController.abort();
+      currentStreamController = new AbortController();
+      const signal = currentStreamController.signal;
+
       try {
-        const resp = await fetch("/api/threads/" + threadId + "/stream");
+        const resp = await fetch("/api/threads/" + threadId + "/stream", { signal });
         if (!resp.ok) { isStreaming = false; return; }
         const reader = resp.body.getReader();
-        streamReader = reader;
         const dec = new TextDecoder();
         let buffer = "";
-        let currentAgent = null;
-        let thinkBuf = "", contentBuf = "", inThink = false;
 
         while (true) {
+          if (signal.aborted) break;
           const { done, value } = await reader.read();
           if (done) break;
           buffer += dec.decode(value, { stream: true });
@@ -302,54 +524,27 @@ const ThreadDetail = {
           buffer = lines.pop();
 
           for (const line of lines) {
+            if (signal.aborted) break;
             if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
             try {
               const data = JSON.parse(line.slice(6));
-              const deltaObj = data.choices?.[0]?.delta || {};
-
-              // System prompt from prompt node
-              if (deltaObj.system_prompt) {
-                const agentId = deltaObj.agent || "";
-                const exists = messages.value.some(m => m.type === "prompt" && m.name === agentId);
-                if (!exists) {
-                  messages.value.push({ role: "system", name: agentId, content: deltaObj.system_prompt, type: "prompt", _thinking: null, _displayContent: deltaObj.system_prompt, _thinkOpen: false });
-                }
-                // Add streaming agent message
-                currentAgent = agentId;
-                inThink = false; thinkBuf = ""; contentBuf = "";
-                const agentExists = messages.value.some(m => m.role === "assistant" && m.name === agentId && m.type !== "prompt");
-                if (!agentExists) {
-                  messages.value.push({ role: "assistant", name: agentId, content: "", _thinking: null, _displayContent: "", _thinkOpen: true, _streaming: true });
-                }
-                continue;
-              }
-
-              const delta = deltaObj.content || "";
-              if (!delta) continue;
-
-              // Find or create the streaming message
-              let streamMsg = messages.value.findLast(m => m._streaming);
-              if (!streamMsg && currentAgent) {
-                streamMsg = { role: "assistant", name: currentAgent, content: "", _thinking: null, _displayContent: "", _thinkOpen: true, _streaming: true };
-                messages.value.push(streamMsg);
-              }
-              if (!streamMsg) continue;
-
-              for (let i = 0; i < delta.length; i++) {
-                const remaining = delta.slice(i);
-                if (!inThink && remaining.startsWith("<think>")) { inThink = true; if (!streamMsg._userToggledThink) streamMsg._thinkOpen = true; i += 6; continue; }
-                if (inThink && remaining.startsWith("</think>")) { inThink = false; streamMsg._thinking = thinkBuf; if (!streamMsg._userToggledThink) streamMsg._thinkOpen = false; i += 7; continue; }
-                if (inThink) { thinkBuf += delta[i]; streamMsg._thinking = thinkBuf; }
-                else { contentBuf += delta[i]; streamMsg._displayContent = contentBuf; streamMsg.content = contentBuf; }
-              }
+              const choiceObj = data.choices?.[0];
+              const deltaObj = choiceObj?.delta || {};
+              processStreamDelta(deltaObj, choiceObj);
             } catch {}
           }
         }
-      } catch {} finally {
-        isStreaming = false;
-        // Finalize any streaming messages
-        messages.value.forEach(m => { if (m._streaming) m._streaming = false; });
-        fetchMessages(); // Load final state from DB
+      } catch (e) {
+        if (e.name !== "AbortError") console.error("Connect error:", e);
+      } finally {
+        if (!signal.aborted) {
+          isStreaming = false;
+          currentStreamController = null;
+          // Finalize any streaming messages
+          messages.value.forEach(m => { if (m._streaming) m._streaming = false; });
+          for (const key in activeStreamStates) delete activeStreamStates[key];
+          fetchMessages(); // Load final state from DB
+        }
       }
     }
 
@@ -360,10 +555,10 @@ const ThreadDetail = {
     });
     onUnmounted(() => {
       clearInterval(poll);
-      if (streamReader) { try { streamReader.cancel(); } catch {} }
+      if (currentStreamController) currentStreamController.abort();
     });
 
-    return { threadId, messages, loading, active, activeAgent, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, abortThread, allExpanded, toggleAllMessages };
+    return { threadId, messages, loading, active, activeAgent, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit };
   }
 };
 

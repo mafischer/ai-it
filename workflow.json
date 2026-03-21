@@ -106,8 +106,8 @@
     "business_analyst": {
       "routes": {
         "REQUIREMENTS_DRAFTED": ["software_architect", "ux_designer"],
-        "REQUIREMENTS_APPROVED": { "$map_previous": { "software_architect": "backend_software_engineer", "ux_designer": "frontend_software_engineer", "default": "software_architect" } },
-        "REQUIREMENTS_AMBIGUOUS": { "$map_previous": { "default": "software_architect" } },
+        "REQUIREMENTS_APPROVED": ["backend_software_engineer", "frontend_software_engineer"],
+        "REQUIREMENTS_AMBIGUOUS": ["software_architect", "ux_designer"],
         "DIRECTIVE_CLEAR": "$self",
         "DIRECTIVE_AMBIGUOUS": "__end__",
         "QUESTION": "__end__"
@@ -121,8 +121,8 @@
         "DESIGN_SATISFIED": "backend_software_engineer",
         "DESIGN_APPROVED": "backend_software_engineer",
         "QUESTION": "business_analyst",
-        "DESIGN_CLEAR": "$self",
-        "DESIGN_AMBIGUOUS": "business_analyst"
+        "REQUIREMENTS_CLEAR": "$self",
+        "REQUIREMENTS_AMBIGUOUS": "business_analyst"
       },
       "approval_triggers": ["IMPLEMENTATION_COMPLETE"],
       "fallback": "router"
@@ -133,8 +133,8 @@
         "DESIGN_APPROVED": "frontend_software_engineer",
         "DESIGN_SATISFIED": "frontend_software_engineer",
         "QUESTION": "business_analyst",
-        "DESIGN_CLEAR": "$self",
-        "DESIGN_AMBIGUOUS": "business_analyst"
+        "REQUIREMENTS_CLEAR": "$self",
+        "REQUIREMENTS_AMBIGUOUS": "business_analyst"
       },
       "approval_triggers": ["IMPLEMENTATION_COMPLETE"],
       "fallback": "router"

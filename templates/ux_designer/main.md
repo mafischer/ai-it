@@ -28,3 +28,13 @@ The following clarifications were gathered:
 
 Incorporate ALL clarifications above into your output.
 {{/hasClarifications}}
+
+## Requirements
+{{input}}
+
+{{#self}}
+## Your Previous UI/UX Design
+{{self}}
+
+If this is a revision, update your design based on the feedback provided in the requirements or clarification history.
+{{/self}}

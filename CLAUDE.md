@@ -1,6 +1,6 @@
 # GEMINI.md
 
-This file provides guidance and technical context for Gemini CLI when working with code in this repository.
+This file provides guidance and technical context for Gemini CLI when working with code in this repository. *(Note: `CLAUDE.md` is symlinked to `GEMINI.md` for efficiency purposes).*
 
 ## Running the Project
 
@@ -29,42 +29,55 @@ User Directive → Business Analyst → [Software Architect ‖ UX Designer] →
 
 Approval loops allow Quality Engineer to send work back upstream. The two parallel pairs (Architect+UX, Backend+Frontend) run concurrently via LangGraph.
 
+### Parallel Synchronization (Fan-In)
+`index.js` implements a `sync_node` mechanism for parallel branches (e.g., Software Architect and UX Designer).
+- Branches route to a `sync_<group>` node which pauses until all members finish.
+- The sync node evaluates combined status: if any member requires clarification from the parent (e.g., Business Analyst), the entire group is routed back.
+- If all are approved, the flow proceeds to implementers (Backend/Frontend).
+
 ### Routing Mechanism
+Agents append `STATUS: <TOKEN>` to their output.
+- **`workflow.json`**: Declarative routing rules.
+- **DSL Tokens**: `$self`, `__end__`, `$map_previous`, `$previous_matching`, and array targets for fan-out.
+- **Prompt Selection**: `index.js` intelligently selects templates:
+    - **`query`**: Initial gathering/ambiguity phase. Bypassed if rounds are exhausted or if a "CLEAR/DRAFTED" state was already reached.
+    - **`approval`**: Triggered when downstream agents return work for review.
+    - **`main`**: The standard drafting/refinement phase. Injects `{{self}}` for iterative updates.
 
-Agents append `STATUS: <TOKEN>` to their output (e.g., `STATUS: REQUIREMENTS_DRAFTED`). Routing rules are defined declaratively in `workflow.json` — each agent has a `routes` map of STATUS tokens to targets. Special DSL tokens: `$self` (loop back), `__end__` (stop), `$map_previous` (context-dependent mapping), `$previous_matching` (find last matching agent), and array targets for parallel fan-out. Unrecognized tokens fall back to an LLM router.
+### Streaming & Real-time UI
+- **Parallel SSE Multiplexing**: `server.js` buffers parallel chunks and serializes them. Each agent's stream includes an `agent` identifier in the chunk delta.
+- **Frontend Buffering**: `app/chat.js` and `app/index.html` maintain `activeStreamStates` per agent to prevent text interleaving during parallel execution.
+- **Finish Signals**: The server emits a per-agent `finish_reason: "stop"` to allow the UI to clear individual spinners immediately.
 
-### LLM Models & Engines
+## Key Features
 
-Configured in `workflow.json` under `engines` and `models`:
-- **Specialist Model:** Used by main agents. Currently points to `lm-studio` running `qwen3.5-27b` (default URL: `http://localhost:1234/v1`).
-- **Router/Utility Model:** Used by the fallback router. Currently points to `llama-server` running `lfm2-8b` (default URL: `http://10.3.0.241:8080/v1` via `LFM2_8B_KEY`).
+### Admin UI (Thread List & Detail)
+- **Thread List**: Displays active status, message counts, and participating agents.
+- **Rewind**: Restarts the workflow from a specific historical message.
+- **Edit & Restart**: Allows modifying a message's content (via a popup editor) before triggering a rewind.
+- **Expand/Collapse**: Support for individual message toggling and "Expand/Collapse All".
+- **Timestamps**: Preserved across rewinds and refreshes using `additional_kwargs` in LangGraph messages.
 
-### Thread Persistence
-
-Thread IDs are MD5 hashes of the original user directive. LangGraph checkpoints are stored in `checkpoints.db` (SQLite), enabling conversation resumption across server restarts.
-
-### Streaming & Job Handling
-
-`server.js` acts as a background job runner and SSE multiplexer. It buffers parallel agent outputs and serializes them in order. Stats (tokens, latency, t/s) are tracked per agent and appended to stderr. A 15-second SSE heartbeat keeps connections alive. Client disconnects do not immediately abort the workflow; they operate as decoupled jobs. A stale request guard auto-aborts workflows that stop producing tokens. Abort signals propagate enabling server-side cancellation.
+### Chat UI
+- **Interactive Bubbles**: Clicking any message bubble toggles its expansion.
+- **Control Layout**: "Expand/Collapse All" is aligned left of the reply box; "Stop" is accessible via the sidebar item menu for active threads.
+- **History Export**: Generates a dark-themed HTML file with collapsible `<think>` blocks, agent labels, and timestamps.
 
 ## Key Files & Directories
 
-- **`workflow.json`** — Declarative workflow DSL: engines, models, pipeline entry, agent definitions (role, emoji, mission, model configuration), and routing rules.
-- **`templates/`** — Markdown templates for agent prompts (e.g., `main.md`, `query.md`, `approval.md`, `continue.md`). They use Mustache tags to inject dynamic context.
-- **`src/config/loader.js`** — Reads `workflow.json` and exports configuration helpers.
-- **`src/config/templates.js`** — Mustache renderer (`renderPrompt`) with HTML escaping disabled.
-- **`src/config/routing.js`** — Resolves DSL routing tokens (`$self`, `$map_previous`, `$previous_matching`, `__end__`, arrays) into concrete agent IDs.
-- **`index.js`** — LangGraph workflow definition. Builds the StateGraph dynamically from `workflow.json`. Each agent is represented by two nodes: a prompt generation node and the LLM invocation node.
-- **`server.js`** — Fastify server providing OpenAI-compatible endpoints (`/v1/chat/completions`), background workflow execution, SSE streaming multiplexer, thread ID management, and admin APIs (`/api/threads/*`).
-- **`src/utils/llm.js`** — `createLLM(key)` factory mapped to `workflow.json` model configurations. Passes `thinking_budget` and custom modelKwargs.
-- **`app/`** — Frontend assets for the admin UI.
-- **`patches/langchain-openai-reasoning.js`** — Postinstall patch for `@langchain/openai` to preserve `reasoning_content` from vllm-mlx's reasoning parser; wraps it in `<think>` tags.
+- **`workflow.json`** — Workflow DSL: engines, models, entry, agent definitions, and routing.
+- **`templates/`** — Markdown templates using Mustache. Supports `{{self}}` for iterative refinement and `{{clarificationHistory}}` with `{{responder}}` labels.
+- **`index.js`** — LangGraph definition. Contains `sync_node` logic and prompt selection heuristics.
+- **`server.js`** — Fastify server + SSE multiplexer. Handles `/api/threads/*` admin endpoints.
+- **`src/config/loader.js`** — Configuration parser.
+- **`src/utils/llm.js`** — LLM factory.
+- **`patches/langchain-openai-reasoning.js`** — Preserves `<think>` blocks from reasoning models.
 
 ## Service Configuration
 
-- **`ai-it-service/`** — macOS LaunchAgent plist to run `server.js` as a system service.
-- **`vllm-service/`** — LaunchAgent + wrapper script to serve models locally via vllm-mlx on Apple Silicon.
+- **`ai-it-service/`** — macOS LaunchAgent for `server.js`.
+- **`vllm-service/`** — LaunchAgent for local LLM serving.
 
 ## Unintegrated Agents
 
-`Site Reliability Engineer`, `DevOps Engineer`, and `Support Engineer` are defined in `workflow.json` with `"active": false` — they have prompts and routing but are excluded from the graph at build time.
+`Site Reliability Engineer`, `DevOps Engineer`, and `Support Engineer` are defined in `workflow.json` with `"active": false`.

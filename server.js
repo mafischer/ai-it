@@ -137,7 +137,7 @@ server.post("/v1/chat/completions", async (request, reply) => {
         (async () => {
             try {
                 console.error(`[STREAM] Starting workflow for thread ${threadId}`);
-                const eventStream = await app.streamEvents({ messages: [{ role: "user", content: lastUserMessage }] }, { ...config, version: "v2", signal: abortController.signal });
+                const eventStream = await app.streamEvents({ messages: [new HumanMessage({ content: lastUserMessage, timestamp: Date.now() })] }, { ...config, version: "v2", signal: abortController.signal });
                 const agentQueue = [], agentBuffers = {}, agentDone = {}, agentHeaders = {}, agentStats = {};
                 let activeAgent = null;
                 const syncActiveAgent = () => { activeThreadAgents[threadId] = { current: activeAgent, queue: [...agentQueue] }; };
@@ -188,8 +188,18 @@ server.post("/v1/chat/completions", async (request, reply) => {
                         const stats = agentStats[agentName];
                         if (stats) { const el = ((Date.now() - stats.startTime) / 1000).toFixed(1); process.stderr.write(`[STATS] ${agentName} done: ${stats.tokenCount} tokens in ${el}s (${(stats.tokenCount / (parseFloat(el) || 1)).toFixed(1)} t/s)\n`); delete agentStats[agentName]; }
                         if (activeAgent === agentName) {
+                            emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: agentName }, finish_reason: "stop" }] });
                             agentQueue.shift();
-                            while (agentQueue.length > 0) { const na = agentQueue[0]; activeAgent = na; const bc = agentBuffers[na]; if (bc) { emitChunk(bc, na); agentBuffers[na] = ""; } if (agentDone[na]) agentQueue.shift(); else break; }
+                            while (agentQueue.length > 0) {
+                                const na = agentQueue[0];
+                                activeAgent = na;
+                                const bc = agentBuffers[na];
+                                if (bc) { emitChunk(bc, na); agentBuffers[na] = ""; }
+                                if (agentDone[na]) {
+                                    emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: na }, finish_reason: "stop" }] });
+                                    agentQueue.shift();
+                                } else break;
+                            }
                             if (agentQueue.length === 0) activeAgent = null;
                             syncActiveAgent();
                         }
@@ -244,7 +254,9 @@ server.post("/v1/chat/completions", async (request, reply) => {
         // Follow live events
         const listener = (data) => {
             writeToClient(data);
-            if (data === "[DONE]" || data?.choices?.[0]?.delta?.finish_reason === "stop") {
+            // Only end the stream on global DONE or global finish_reason: stop (without agent field)
+            const isGlobalStop = data?.choices?.[0]?.finish_reason === "stop" && !data?.choices?.[0]?.delta?.agent;
+            if (data === "[DONE]" || isGlobalStop) {
                 job.listeners.delete(listener);
                 clearInterval(heartbeat);
                 if (!clientDisconnected) reply.raw.end();
@@ -367,10 +379,12 @@ server.get("/api/threads/:threadId/messages", async (request) => {
             const role = type === "human" ? "user" : kwargs.name ? "assistant" : kwargs.role === "user" || kwargs.role === "human" ? "user" : type === "ai" ? "assistant" : "user";
             const name = kwargs.name || "";
             const isPrompt = name.endsWith("__prompt");
+            const add = m.additional_kwargs || {};
             return {
                 role: isPrompt ? "system" : role,
                 name: isPrompt ? name.replace("__prompt", "") : name,
-                content: kwargs.content || "",
+                content: kwargs.content || m.content || "",
+                timestamp: kwargs.timestamp || add.timestamp || m.timestamp || null,
                 ...(isPrompt && { type: "prompt" }),
             };
         });
@@ -419,7 +433,9 @@ server.get("/api/threads/:threadId/stream", async (request, reply) => {
         const heartbeat = setInterval(() => { if (!clientDisconnected) { try { reply.raw.write(": keep-alive\n\n"); } catch {} } }, 15000);
         const listener = (data) => {
             writeToClient(data);
-            if (data === "[DONE]" || data?.choices?.[0]?.delta?.finish_reason === "stop") {
+            // Only end the stream on global DONE or global finish_reason: stop (without agent field)
+            const isGlobalStop = data?.choices?.[0]?.finish_reason === "stop" && !data?.choices?.[0]?.delta?.agent;
+            if (data === "[DONE]" || isGlobalStop) {
                 job.listeners.delete(listener);
                 clearInterval(heartbeat);
                 if (!clientDisconnected) reply.raw.end();
@@ -457,7 +473,7 @@ server.post("/api/threads/:threadId/abort", async (request, reply) => {
 
 server.post("/api/threads/:threadId/rewind", async (request, reply) => {
     const { threadId } = request.params;
-    const { messageIndex } = request.body;
+    const { messageIndex, newContent } = request.body;
 
     // Abort active job if any
     const controller = threadAbortControllers[threadId];
@@ -483,22 +499,23 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         const getMsgRole = (m) => { const t = m?.type || ""; return m?.role || m?.kwargs?.role || (t === "human" ? "user" : getMsgName(m) ? "assistant" : t === "ai" ? "assistant" : "user"); };
         const getMsgContent = (m) => m?.content || m?.kwargs?.content || "";
 
-        const toLangChainMessage = (role, content, name) => {
-            const kwargs = { content };
-            if (name) kwargs.name = name;
-            if (role === "user") return new HumanMessage(kwargs);
-            if (role === "system") return new SystemMessage(kwargs);
-            return new AIMessage(kwargs);
+        const toLangChainMessage = (role, content, name, timestamp) => {
+            const fields = { content, name, additional_kwargs: {} };
+            if (timestamp) fields.additional_kwargs.timestamp = timestamp;
+            if (role === "user") return new HumanMessage(fields);
+            if (role === "system") return new SystemMessage(fields);
+            return new AIMessage(fields);
         };
 
         const truncatedMsgs = msgs.slice(0, messageIndex).map(m => {
-            return toLangChainMessage(getMsgRole(m), getMsgContent(m), getMsgName(m));
+            const kwargs = m.kwargs || {};
+            return toLangChainMessage(getMsgRole(m), getMsgContent(m), getMsgName(m), kwargs.timestamp || m.timestamp);
         });
-        
+
         const rewindMsg = msgs[messageIndex];
         const rewindRole = getMsgRole(rewindMsg);
         const rewindName = getMsgName(rewindMsg);
-        const rewindContent = getMsgContent(rewindMsg);
+        const rewindContent = newContent !== undefined ? newContent : getMsgContent(rewindMsg);
 
         const dbw = getCheckpointDB(true);
 
@@ -552,7 +569,7 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
 
         (async () => {
             try {
-                const invokeMsg = toLangChainMessage(rewindRole, rewindContent, rewindName);
+                const invokeMsg = toLangChainMessage(rewindRole, rewindContent, rewindName, Date.now());
                 const eventStream = await app.streamEvents({ messages: [invokeMsg] }, { ...cfg, version: "v2", signal: newAbortController.signal });
                 const agentQueue = [], agentBuffers = {}, agentDone = {}, agentHeaders = {}, agentStats = {};
                 let activeAgent = null;
@@ -596,8 +613,18 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                         agentDone[agentName] = true;
                         if (agentStats[agentName]) delete agentStats[agentName];
                         if (activeAgent === agentName) {
+                            emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: agentName }, finish_reason: "stop" }] });
                             agentQueue.shift();
-                            while (agentQueue.length > 0) { const na = agentQueue[0]; activeAgent = na; const bc = agentBuffers[na]; if (bc) { emitChunk(bc, na); agentBuffers[na] = ""; } if (agentDone[na]) agentQueue.shift(); else break; }
+                            while (agentQueue.length > 0) {
+                                const na = agentQueue[0];
+                                activeAgent = na;
+                                const bc = agentBuffers[na];
+                                if (bc) { emitChunk(bc, na); agentBuffers[na] = ""; }
+                                if (agentDone[na]) {
+                                    emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: na }, finish_reason: "stop" }] });
+                                    agentQueue.shift();
+                                } else break;
+                            }
                             if (agentQueue.length === 0) activeAgent = null;
                             syncActiveAgent();
                         }
