@@ -1,7 +1,7 @@
+import "dotenv/config";
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
-import { app, routerLLM as utilityLLM, initConfig } from "./index.js";
 import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
 import Database from "better-sqlite3";
@@ -9,8 +9,18 @@ import { existsSync } from "fs";
 import { execSync } from "child_process";
 import { fileURLToPath } from "url";
 import path from "path";
-import { getAgentEmojis, getAgentMissions, getActiveAgents, getConfig } from "./src/config/loader.js";
 import { HumanMessage, AIMessage, SystemMessage } from "@langchain/core/messages";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { CallbackHandler } from "langfuse-langchain";
+import { Langfuse } from "langfuse";
+
+// Import app last to ensure process.env is set before index.js initializes Langfuse
+import { app, routerLLM as utilityLLM, initConfig, researchEvents } from "./index.js";
+import { getAgentEmojis, getAgentMissions, getActiveAgents, getConfig } from "./src/config/loader.js";
+import { registerTools } from "./tools/web-search/tools.js";
+
+console.log(`[LANGFUSE] Initialized with host: ${process.env.LANGFUSE_HOST || process.env.LANGFUSE_BASE_URL}`);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +31,7 @@ await server.register(fastifyStatic, { root: path.join(__dirname, "app"), prefix
 const activeThreads = new Set();
 const threadAbortControllers = {};
 const activeThreadAgents = {};
+const threadPauseRequested = {};
 
 // Background workflow jobs — decoupled from HTTP connections
 // Each job accumulates SSE events that clients can tap into
@@ -76,9 +87,10 @@ server.post("/v1/chat/completions", async (request, reply) => {
     // Utility requests (title generation, follow-up suggestions, etc.)
     if (cleanedMessages[0]?.role === "system") {
         console.error(`[UTILITY] Proxying to lfm2-8b (${cleanedMessages.length} msgs)`);
+        const utilityConfig = { ...config };
         try {
             if (!stream) {
-                const response = await utilityLLM.invoke(cleanedMessages);
+                const response = await utilityLLM.invoke(cleanedMessages, utilityConfig);
                 return {
                     id: requestId, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org",
                     choices: [{ index: 0, message: { role: "assistant", content: response.content }, finish_reason: "stop" }],
@@ -87,7 +99,7 @@ server.post("/v1/chat/completions", async (request, reply) => {
             reply.hijack();
             reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" });
             const writeChunk = (content) => reply.raw.write(`data: ${JSON.stringify({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
-            for await (const chunk of await utilityLLM.stream(cleanedMessages)) {
+            for await (const chunk of await utilityLLM.stream(cleanedMessages, utilityConfig)) {
                 if (chunk.content) writeChunk(chunk.content);
             }
             reply.raw.write(`data: ${JSON.stringify({ id: requestId, object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
@@ -105,7 +117,18 @@ server.post("/v1/chat/completions", async (request, reply) => {
     const firstMsg = originalDirective;
     const threadId = crypto.createHash('md5').update(firstMsg).digest('hex').substring(0, 12);
 
+    const directivePreview = originalDirective.length > 80 ? originalDirective.slice(0, 80) + "…" : originalDirective;
     const config = { configurable: { thread_id: threadId }, recursionLimit: 100 };
+    if (process.env.LANGFUSE_SECRET_KEY || process.env.LANGFUSE_PUBLIC_KEY) {
+        console.error(`[LANGFUSE] Creating CallbackHandler for thread ${threadId}`);
+        config.callbacks = [new CallbackHandler({
+            sessionId: threadId,
+            userId: "user",
+            publicKey: process.env.LANGFUSE_PUBLIC_KEY,
+            secretKey: process.env.LANGFUSE_SECRET_KEY,
+            baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST
+        })];
+    }
 
     if (!stream) {
         try {
@@ -128,82 +151,157 @@ server.post("/v1/chat/completions", async (request, reply) => {
         const abortController = new AbortController();
         threadAbortControllers[threadId] = abortController;
 
-        const emit = (data) => { job.events.push(data); for (const fn of job.listeners) { try { fn(data); } catch {} } };
-        const emitChunk = (content, agent) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { content, ...(agent && { agent }) }, finish_reason: null }] });
-
         let lastTokenTime = Date.now();
-        const staleGuard = setInterval(() => { if (Date.now() - lastTokenTime > 600000) { abortController.abort(); clearInterval(staleGuard); } }, 10000);
+        const activeAgentSet = new Set(), agentStats = {};
+        const syncActiveAgent = () => { activeThreadAgents[threadId] = { current: [...activeAgentSet][0] || null, queue: [...activeAgentSet] }; };
+
+        const emit = (data) => { 
+            lastTokenTime = Date.now();
+            job.events.push(data); 
+            for (const fn of job.listeners) { try { fn(data); } catch {} } 
+        };
+        const emitChunk = (content, agent) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { content, ...(agent && { agent }) }, finish_reason: null }] });
+        const emitToolActivity = (data) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { agent: data.agent, tool_activity: data }, finish_reason: null }] });
+        const onResearchEvent = (data) => { if (data.threadId === threadId) emitToolActivity(data); };
+        const onResearchPrompt = (data) => { if (data.threadId === threadId) emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: (typeof model !== "undefined" ? model : "ai-it-org"), choices: [{ index: 0, delta: { content: "", system_prompt: data.prompt, agent: data.agent }, finish_reason: null }] }); };
+        const onResearchChunk = (data) => { if (data.threadId === threadId) emitChunk(data.content, data.agent); };
+        const onResearchStop = (data) => { 
+            if (data.threadId === threadId) {
+                emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: (typeof model !== "undefined" ? model : "ai-it-org"), choices: [{ index: 0, delta: { content: "", agent: data.agent }, finish_reason: "stop" }] }); 
+                activeAgentSet.delete(data.agent);
+                syncActiveAgent();
+            }
+        };
+        researchEvents.on("tool", onResearchEvent);
+
+        researchEvents.on("prompt", onResearchPrompt);
+        researchEvents.on("chunk", onResearchChunk);
+        researchEvents.on("stop", onResearchStop);
+
+        const staleGuard = setInterval(() => { 
+            if (Date.now() - lastTokenTime > 600000) { 
+                const activeJobs = Object.entries(agentStats).map(([name, stats]) => {
+                    const duration = ((Date.now() - stats.startTime) / 1000).toFixed(1);
+                    return `${name} (${duration}s, ${stats.tokenCount} tokens)`;
+                }).join(", ");
+                console.error(`[STALE] Aborting thread ${threadId}. Active jobs: ${activeJobs || "none"}. Last token: ${((Date.now() - lastTokenTime)/1000).toFixed(1)}s ago`);
+                abortController.abort(); 
+                clearInterval(staleGuard); 
+            } 
+        }, 10000);
 
         (async () => {
             try {
                 console.error(`[STREAM] Starting workflow for thread ${threadId}`);
                 const eventStream = await app.streamEvents({ messages: [new HumanMessage({ content: lastUserMessage, timestamp: Date.now() })] }, { ...config, version: "v2", signal: abortController.signal });
-                const agentQueue = [], agentBuffers = {}, agentDone = {}, agentHeaders = {}, agentStats = {};
-                let activeAgent = null;
-                const syncActiveAgent = () => { activeThreadAgents[threadId] = { current: activeAgent, queue: [...agentQueue] }; };
-
+                const researchPromptSent = new Set();
+                const agentContentBuffers = {}; // Buffer content per agent for scoring
+                let baClarificationRounds = 0;
+                
                 for await (const event of eventStream) {
                     const eventType = event.event, nodeName = event.metadata?.langgraph_node;
-                    if (!nodeName || nodeName === "__start__") continue;
-                    if (nodeName === "project_manager" && eventType === "on_chain_end") {
-                        const output = event.data.output;
-                        // PM routing decisions are handled internally, not streamed
-                        continue;
-                    }
-                    if (nodeName === "project_manager") continue;
+                    
+                    if (!nodeName || nodeName === "__start__" || nodeName === "project_manager") continue;
+                    if (event.tags?.includes("hide_stream") || event.metadata?.tags?.includes("hide_stream")) continue;
                     const validAgents = getActiveAgents();
-                    const isPromptNode = event.name?.endsWith("_prompt") && validAgents.includes(event.name.replace(/_prompt$/, ""));
-                    const resolvedAgentName = isPromptNode ? event.name.replace(/_prompt$/, "") : event.name;
-                    if (eventType === "on_chain_end" && isPromptNode) {
-                        for (const pm of (event.data?.output?.messages || [])) {
-                            const pc = pm.content || pm.kwargs?.content || "";
-                            if (pc) emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: pc, agent: resolvedAgentName }, finish_reason: null }] });
-                        }
-                        continue;
+                    
+                    const actualNodeName = event.metadata?.langgraph_node || "";
+                    const isPromptNode = actualNodeName.endsWith("_prompt") && validAgents.includes(actualNodeName.replace(/_prompt$/, ""));
+                    
+                    console.error(`[STREAM EVENT] type=${eventType} name=${event.name} nodeName=${nodeName} actual=${actualNodeName} prompt=${isPromptNode}`);
+
+                    // Skip prompt nodes entirely in the UI stream
+                    if (isPromptNode) continue;
+
+                    const isResearchNode = actualNodeName.endsWith("_research") && validAgents.includes(actualNodeName.replace(/_research$/, ""));
+                    const resolvedAgentName = isResearchNode ? actualNodeName : actualNodeName;
+
+                    if (eventType === "on_chain_start" && (validAgents.includes(actualNodeName) || isResearchNode)) {
+                        activeAgentSet.add(resolvedAgentName);
+                        syncActiveAgent();
+                        emitChunk("", resolvedAgentName);
                     }
-                    if (eventType === "on_chain_start" && (validAgents.includes(event.name) || isPromptNode)) {
-                        const agentName = resolvedAgentName;
-                        if (!agentQueue.includes(agentName)) { agentQueue.push(agentName); agentBuffers[agentName] = ""; agentDone[agentName] = false; agentHeaders[agentName] = { prompt: null, headerSent: false }; if (!activeAgent) activeAgent = agentName; syncActiveAgent(); }
-                    }
-                    if (eventType === "on_chat_model_start" && validAgents.includes(nodeName)) {
+                    if (eventType === "on_chat_model_start" && (validAgents.includes(actualNodeName) || isResearchNode)) {
+                        lastTokenTime = Date.now(); // Reset stale guard on prefill start
                         const inputMsgs = event.data.input?.messages || [];
                         let prompt = "Processing...";
                         if (inputMsgs.length > 0) { const fm = Array.isArray(inputMsgs[0]) ? inputMsgs[0][0] : inputMsgs[0]; prompt = fm.kwargs?.content || fm.content || prompt; }
-                        agentHeaders[nodeName] = agentHeaders[nodeName] || { prompt: null, headerSent: false };
-                        agentHeaders[nodeName].prompt = prompt.trim();
-                        agentStats[nodeName] = { startTime: Date.now(), tokenCount: 0, promptChars: prompt.length };
-                        process.stderr.write(`[STATS] ${nodeName} prompt: ${prompt.length.toLocaleString()} chars\n`);
-                        agentHeaders[nodeName].headerSent = true;
-                    }
-                    if (eventType === "on_chat_model_stream" && validAgents.includes(nodeName)) {
-                        lastTokenTime = Date.now();
-                        const rawContent = event.data.chunk.content;
-                        if (!rawContent) continue;
-                        if (agentStats[nodeName]) agentStats[nodeName].tokenCount++;
-                        if (activeAgent === nodeName) emitChunk(rawContent, nodeName); else agentBuffers[nodeName] = (agentBuffers[nodeName] || "") + rawContent;
-                    }
-                    if (eventType === "on_chain_end" && validAgents.includes(event.name)) {
-                        const agentName = event.name;
-                        agentDone[agentName] = true;
-                        const stats = agentStats[agentName];
-                        if (stats) { const el = ((Date.now() - stats.startTime) / 1000).toFixed(1); process.stderr.write(`[STATS] ${agentName} done: ${stats.tokenCount} tokens in ${el}s (${(stats.tokenCount / (parseFloat(el) || 1)).toFixed(1)} t/s)\n`); delete agentStats[agentName]; }
-                        if (activeAgent === agentName) {
-                            emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: agentName }, finish_reason: "stop" }] });
-                            agentQueue.shift();
-                            while (agentQueue.length > 0) {
-                                const na = agentQueue[0];
-                                activeAgent = na;
-                                const bc = agentBuffers[na];
-                                if (bc) { emitChunk(bc, na); agentBuffers[na] = ""; }
-                                if (agentDone[na]) {
-                                    emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: na }, finish_reason: "stop" }] });
-                                    agentQueue.shift();
-                                } else break;
-                            }
-                            if (agentQueue.length === 0) activeAgent = null;
-                            syncActiveAgent();
+                        agentStats[actualNodeName] = { startTime: Date.now(), tokenCount: 0, promptChars: prompt.length };
+                        process.stderr.write(`[STATS] ${actualNodeName} prompt: ${prompt.length.toLocaleString()} chars\n`);
+                        
+                        if (!researchPromptSent.has(actualNodeName)) {
+                            researchPromptSent.add(actualNodeName);
+                            emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: prompt, agent: resolvedAgentName }, finish_reason: null }] });
                         }
                     }
+                    if (eventType === "on_chat_model_stream") {
+                        const targetAgent = actualNodeName;
+                        if (targetAgent && (validAgents.includes(targetAgent) || isResearchNode)) {
+                            lastTokenTime = Date.now();
+                            let rawContent = event.data.chunk.content;
+                            if (Array.isArray(rawContent)) rawContent = rawContent.map(c => typeof c === 'string' ? c : (c.text || "")).join("");
+                            if (!rawContent) continue;
+                            if (agentStats[targetAgent]) agentStats[targetAgent].tokenCount++;
+                            if (!agentContentBuffers[targetAgent]) agentContentBuffers[targetAgent] = "";
+                            agentContentBuffers[targetAgent] += rawContent;
+                            emitChunk(rawContent, targetAgent);
+                        }
+                    }
+                    if (eventType === "on_chain_end" && (validAgents.includes(actualNodeName) || isResearchNode)) {
+                        const agentName = resolvedAgentName;
+                        const stats = agentStats[agentName];
+                        if (stats) { const el = ((Date.now() - stats.startTime) / 1000).toFixed(1); process.stderr.write(`[STATS] ${agentName} done: ${stats.tokenCount} tokens in ${el}s (${(stats.tokenCount / (parseFloat(el) || 1)).toFixed(1)} t/s)\n`); delete agentStats[agentName]; }
+                        // Agent scoring: extract STATUS and send Langfuse scores
+                        if (agentContentBuffers[agentName]) {
+                            const statusMatch = agentContentBuffers[agentName].match(/STATUS:\s*(\w+)/);
+                            if (statusMatch) {
+                                const status = statusMatch[1];
+                                // QE approval scoring
+                                if (agentName === "quality_engineer") {
+                                    const scoreMap = { TESTS_PASSED: 1, TESTING_COMPLETE: 1, REJECTED: 0, QUESTION: 0.5, TESTING_AMBIGUOUS: 0.5, TESTING_CLEAR: 0.75 };
+                                    const scoreValue = scoreMap[status] ?? 0.5;
+                                    try {
+                                        const lfHandler = config.callbacks?.find(c => c instanceof CallbackHandler);
+                                        const traceId = lfHandler?.traceId;
+                                        const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
+                                        lf.score({ traceId, sessionId: threadId, name: "qe_approval", value: scoreValue, comment: `STATUS: ${status}`, metadata: { agent: "quality_engineer", status } });
+                                        await lf.flushAsync();
+                                        console.error(`[LANGFUSE] QE score: ${status} = ${scoreValue} for thread ${threadId}`);
+                                    } catch (e) { console.error("[LANGFUSE] QE score error:", e.message); }
+                                }
+                                // BA clarification rounds scoring
+                                if (agentName === "business_analyst") {
+                                    if (status === "DIRECTIVE_AMBIGUOUS") {
+                                        baClarificationRounds++;
+                                        console.error(`[LANGFUSE] BA clarification round ${baClarificationRounds} for thread ${threadId}`);
+                                    } else if (status === "DIRECTIVE_CLEAR") {
+                                        try {
+                                            const lfHandler = config.callbacks?.find(c => c instanceof CallbackHandler);
+                                            const traceId = lfHandler?.traceId;
+                                            const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
+                                            lf.score({ traceId, sessionId: threadId, name: "clarification_rounds", value: baClarificationRounds, comment: baClarificationRounds === 0 ? "No clarification needed" : `${baClarificationRounds} round(s) before clear`, metadata: { agent: "business_analyst" } });
+                                            await lf.flushAsync();
+                                            console.error(`[LANGFUSE] BA clarification_rounds: ${baClarificationRounds} for thread ${threadId}`);
+                                        } catch (e) { console.error("[LANGFUSE] BA score error:", e.message); }
+                                    }
+                                }
+                            }
+                        }
+                        delete agentContentBuffers[agentName];
+                        emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: agentName }, finish_reason: "stop" }] });
+                        activeAgentSet.delete(agentName);
+                        syncActiveAgent();
+                        // Pause check: if all current agents finished and pause was requested, stop cleanly
+                        if (threadPauseRequested[threadId] && activeAgentSet.size === 0) {
+                            const activeJobs = Object.entries(agentStats).map(([name, stats]) => {
+                                const duration = ((Date.now() - stats.startTime) / 1000).toFixed(1);
+                                return `${name} (${duration}s, ${stats.tokenCount} tokens)`;
+                            }).join(", ");
+                            console.error(`[PAUSE] All agents drained for thread ${threadId}, pausing workflow. Active jobs: ${activeJobs || "none"}`);
+                            abortController.abort();
+                        }
+                    }
+
                 }
                 emit({ id: requestId, object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
                 emit("[DONE]");
@@ -212,7 +310,33 @@ server.post("/v1/chat/completions", async (request, reply) => {
                     console.error("Stream Error:", error); job.error = error.message;
                 } else { console.error("[STREAM] Aborted"); }
             } finally {
-                job.done = true; activeThreads.delete(threadId); delete activeThreadAgents[threadId]; delete threadAbortControllers[threadId]; clearInterval(staleGuard);
+                researchEvents.off("tool", onResearchEvent);
+                researchEvents.off("prompt", onResearchPrompt);
+                researchEvents.off("chunk", onResearchChunk);
+                researchEvents.off("stop", onResearchStop);
+                // Flush Langfuse: first flush handler, then overwrite trace fields via raw SDK
+                // (LangGraph's callback auto-names traces "LangGraph" on chain_end, so we must override after)
+                const lfHandler = config.callbacks?.find(c => c instanceof CallbackHandler);
+                if (lfHandler) {
+                    try {
+                        await lfHandler.flushAsync();
+                        const traceId = lfHandler.traceId;
+                        if (traceId) {
+                            const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
+                            lf.trace({
+                                id: traceId,
+                                name: directivePreview,
+                                sessionId: threadId,
+                                input: originalDirective,
+                                output: job.error ? { error: job.error } : { status: "completed" },
+                                tags: ["ai-it", "chat"],
+                                metadata: { thread_id: threadId, directive: originalDirective }
+                            });
+                            await lf.flushAsync();
+                        }
+                    } catch (e) { console.error("[LANGFUSE] Flush error:", e.message); }
+                }
+                job.done = true; activeThreads.delete(threadId); delete activeThreadAgents[threadId]; delete threadAbortControllers[threadId]; delete threadPauseRequested[threadId]; clearInterval(staleGuard);
                 setTimeout(() => { delete workflowJobs[threadId]; }, 300000);
             }
         })();
@@ -286,9 +410,13 @@ server.get("/api/threads", async () => {
         try {
             const cp = JSON.parse(db.prepare("SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_id = ? AND checkpoint_ns = ''").get(t.thread_id, t.checkpoint_id).checkpoint);
             const msgs = cp.channel_values?.messages || [];
-            const firstMsg = msgs[0]?.kwargs?.content || "(empty)";
+            const firstMsgRaw = msgs[0]?.kwargs?.content || "(empty)";
+            const firstMsg = typeof firstMsgRaw === 'string' ? firstMsgRaw : JSON.stringify(firstMsgRaw);
             const directive = firstMsg;
-            const agentNames = [...new Set(msgs.filter(m => m.kwargs?.name).map(m => m.kwargs.name))];
+            const agentNames = [...new Set(msgs.filter(m => m.kwargs?.name).map(m => {
+                const name = m.kwargs.name;
+                return typeof name === 'string' ? name : String(name || "");
+            }))];
             
             // Get cached title and created_at
             let title = null;
@@ -373,23 +501,81 @@ server.get("/api/threads/:threadId/messages", async (request) => {
     if (!row) return [];
     try {
         const data = JSON.parse(row.checkpoint);
-        return (data.channel_values?.messages || []).map(m => {
+        const msgs = (data.channel_values?.messages || []).map(m => {
             const kwargs = m.kwargs || {};
             const type = m.type || "";
-            const role = type === "human" ? "user" : kwargs.name ? "assistant" : kwargs.role === "user" || kwargs.role === "human" ? "user" : type === "ai" ? "assistant" : "user";
-            const name = kwargs.name || "";
+            const idTag = Array.isArray(m.id) ? m.id.find(s => typeof s === 'string' && s.endsWith("Message")) || "" : "";
+            const isHuman = type === "human" || idTag === "HumanMessage";
+            const isSystem = type === "system" || idTag === "SystemMessage";
+            const isAI = type === "ai" || idTag === "AIMessage";
+            const roleRaw = isSystem ? "system" : isHuman ? "user" : (typeof kwargs.name === 'string' && kwargs.name && !kwargs.name.startsWith("[")) ? "assistant" : kwargs.role === "user" || kwargs.role === "human" ? "user" : isAI ? "assistant" : "user";
+            const role = typeof roleRaw === 'string' ? roleRaw : String(roleRaw || "user");
+            const nameRaw = isHuman ? "" : (typeof kwargs.name === 'string' ? kwargs.name : null) || (typeof m.name === 'string' ? m.name : null) || (typeof m.additional_kwargs?.name === 'string' ? m.additional_kwargs.name : null) || "";
+            const name = typeof nameRaw === 'string' ? nameRaw : String(nameRaw || "");
             const isPrompt = name.endsWith("__prompt");
+            const isResearch = name.endsWith("__research");
+            
+            // Clean up the name for the frontend
+            let cleanName = name;
+            if (isPrompt) cleanName = name.replace("__prompt", "");
+            else if (isResearch) cleanName = name.replace("__research", "");
+
+            const contentRaw = kwargs.content || m.content || "";
+            const content = typeof contentRaw === 'string' ? contentRaw : JSON.stringify(contentRaw);
+
             const add = m.additional_kwargs || {};
             return {
                 role: isPrompt ? "system" : role,
-                name: isPrompt ? name.replace("__prompt", "") : name,
-                content: kwargs.content || m.content || "",
+                name: cleanName,
+                content: content,
                 timestamp: kwargs.timestamp || add.timestamp || m.timestamp || null,
                 ...(isPrompt && { type: "prompt" }),
+                _isPromptOriginal: isPrompt
             };
         });
-        return msgs;
-    } catch { return []; }
+        // Merge saved ratings
+        try {
+            const rdb = getCheckpointDB();
+            try { rdb.exec("CREATE TABLE IF NOT EXISTS message_ratings (thread_id TEXT, message_index INTEGER, rating INTEGER, PRIMARY KEY (thread_id, message_index))"); } catch {}
+            const ratings = rdb.prepare("SELECT message_index, rating FROM message_ratings WHERE thread_id = ?").all(request.params.threadId);
+            rdb.close();
+            const ratingsMap = new Map(ratings.map(r => [r.message_index, r.rating]));
+            return msgs.map((m, i) => ({ ...m, rating: ratingsMap.get(i) || 0 }));
+        } catch { return msgs; }
+    } catch (e) { console.error("[MESSAGES] Error parsing messages", e); return []; }
+});
+
+server.post("/api/threads/:threadId/messages/:messageIndex/score", async (request, reply) => {
+    const { threadId, messageIndex } = request.params;
+    const idx = parseInt(messageIndex, 10);
+    const { rating, agentName } = request.body || {};
+    if (!rating || rating < 1 || rating > 5) return reply.code(400).send({ error: "Rating must be 1-5" });
+
+    // Persist locally
+    const db = getCheckpointDB(true);
+    try { db.exec("CREATE TABLE IF NOT EXISTS message_ratings (thread_id TEXT, message_index INTEGER, rating INTEGER, PRIMARY KEY (thread_id, message_index))"); } catch {}
+    db.prepare("INSERT OR REPLACE INTO message_ratings (thread_id, message_index, rating) VALUES (?, ?, ?)").run(threadId, idx, rating);
+    db.close();
+
+    // Send to Langfuse — look up latest trace for this session
+    if (process.env.LANGFUSE_SECRET_KEY) {
+        try {
+            const authHeader = "Basic " + Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
+            const baseUrl = process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST;
+            const traceRes = await fetch(`${baseUrl}/api/public/traces?sessionId=${encodeURIComponent(threadId)}&limit=1`, { headers: { Authorization: authHeader } });
+            const traceData = await traceRes.json();
+            const traceId = traceData.data?.[0]?.id;
+            if (traceId) {
+                const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl });
+                lf.score({ traceId, name: "user_rating", value: rating, comment: agentName || "", metadata: { agent: agentName, messageIndex: idx } });
+                await lf.flushAsync();
+            } else {
+                console.error(`[LANGFUSE] No trace found for session ${threadId}, score not sent`);
+            }
+        } catch (e) { console.error("[LANGFUSE] User rating score error:", e.message); }
+    }
+
+    return { ok: true };
 });
 
 server.get("/api/active", async () => {
@@ -471,6 +657,105 @@ server.post("/api/threads/:threadId/abort", async (request, reply) => {
     return reply.code(404).send({ error: "No active workflow for this thread" });
 });
 
+server.post("/api/threads/:threadId/pause", async (request, reply) => {
+    const { threadId } = request.params;
+    if (!activeThreads.has(threadId)) return reply.code(404).send({ error: "No active workflow for this thread" });
+    threadPauseRequested[threadId] = true;
+    console.error(`[PAUSE] Pause requested for thread ${threadId}`);
+    return { message: "Pause requested — workflow will stop after current inference(s) complete" };
+});
+
+server.post("/api/threads/:threadId/clone", async (request, reply) => {
+    const { threadId } = request.params;
+    const { messageIndex } = request.body;
+
+    try {
+        const db = getCheckpointDB();
+        const row = db.prepare("SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id DESC LIMIT 1").get(threadId);
+        db.close();
+        if (!row) return reply.code(404).send({ error: "Thread not found" });
+        const data = JSON.parse(row.checkpoint);
+        const msgs = data.channel_values?.messages || [];
+        if (messageIndex < 0 || messageIndex >= msgs.length) return reply.code(400).send({ error: "Invalid message index" });
+
+        const getMsgName = (m) => {
+            const isHuman = m?.type === "human" || (Array.isArray(m?.id) && m.id.includes("HumanMessage"));
+            if (isHuman) return "";
+            const name = (typeof m?.kwargs?.name === 'string' ? m.kwargs.name : null) || (typeof m?.name === 'string' ? m.name : null) || (typeof m?.additional_kwargs?.name === 'string' ? m.additional_kwargs.name : null) || "";
+            return typeof name === 'string' ? name : "";
+        };
+        const getMsgRole = (m) => { const t = m?.type || ""; if (t === "system" || (Array.isArray(m?.id) && m.id.includes("SystemMessage")) || (getMsgName(m) || "").endsWith("__prompt")) return "system"; return m?.role || m?.kwargs?.role || (t === "human" || (Array.isArray(m?.id) && m.id.includes("HumanMessage")) ? "user" : getMsgName(m) ? "assistant" : t === "ai" ? "assistant" : "user"); };
+        const getMsgContent = (m) => m?.content || m?.kwargs?.content || "";
+
+        const toLangChainMessage = (role, content, name, timestamp) => {
+            const fields = { content, name, additional_kwargs: {} };
+            if (timestamp) fields.additional_kwargs.timestamp = timestamp;
+            if (role === "user") return new HumanMessage(fields);
+            if (role === "system") return new SystemMessage(fields);
+            return new AIMessage(fields);
+        };
+
+        const clonedMsgs = msgs.slice(0, messageIndex + 1).map(m => {
+            const kwargs = m.kwargs || {};
+            return toLangChainMessage(getMsgRole(m), getMsgContent(m), getMsgName(m), kwargs.timestamp || m.timestamp);
+        });
+
+        const newThreadId = crypto.randomUUID().substring(0, 12);
+        const cfg = { configurable: { thread_id: newThreadId }, recursionLimit: 100 };
+        await app.updateState(cfg, { messages: clonedMsgs });
+
+        // Copy title with "(clone)" suffix
+        const titleDb = getCheckpointDB(true);
+        if (titleDb) {
+            try { titleDb.exec("CREATE TABLE IF NOT EXISTS thread_titles (thread_id TEXT PRIMARY KEY, title TEXT NOT NULL)"); } catch {}
+            try { titleDb.exec("ALTER TABLE thread_titles ADD COLUMN created_at INTEGER"); } catch {}
+            const titleRow = titleDb.prepare("SELECT title FROM thread_titles WHERE thread_id = ?").get(threadId);
+            const cloneTitle = (titleRow?.title || "Untitled") + " (clone)";
+            titleDb.prepare("INSERT OR REPLACE INTO thread_titles (thread_id, title, created_at) VALUES (?, ?, ?)").run(newThreadId, cloneTitle, Math.floor(Date.now() / 1000));
+            titleDb.close();
+        }
+
+        return { thread_id: newThreadId, message: "Thread cloned successfully" };
+    } catch (e) {
+        console.error("[ADMIN] Clone error:", e);
+        return reply.code(500).send({ error: e.message });
+    }
+});
+
+server.post("/api/threads/:threadId/resume", async (request, reply) => {
+    const { threadId } = request.params;
+
+    try {
+        const db = getCheckpointDB();
+        const row = db.prepare("SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id DESC LIMIT 1").get(threadId);
+        db.close();
+        if (!row) return reply.code(404).send({ error: "Thread not found" });
+        const data = JSON.parse(row.checkpoint);
+        const msgs = data.channel_values?.messages || [];
+        if (!msgs.length) return reply.code(400).send({ error: "Thread has no messages" });
+
+        // Find the last non-prompt message to resume from
+        let resumeIndex = msgs.length - 1;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            const name = msgs[i]?.name || msgs[i]?.kwargs?.name || "";
+            if (!name.endsWith("__prompt")) { resumeIndex = i; break; }
+        }
+
+        // Delegate to the rewind handler
+        request.body = { messageIndex: resumeIndex };
+        return server.inject({
+            method: "POST",
+            url: `/api/threads/${threadId}/rewind`,
+            payload: { messageIndex: resumeIndex },
+        }).then(res => {
+            reply.code(res.statusCode).headers(res.headers).send(res.json());
+        });
+    } catch (e) {
+        console.error("[ADMIN] Resume error:", e);
+        return reply.code(500).send({ error: e.message });
+    }
+});
+
 server.post("/api/threads/:threadId/rewind", async (request, reply) => {
     const { threadId } = request.params;
     const { messageIndex, newContent } = request.body;
@@ -493,11 +778,16 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         if (!row) return reply.code(404).send({ error: "Thread not found" });
         const data = JSON.parse(row.checkpoint);
         const msgs = data.channel_values?.messages || [];
-        if (messageIndex < 0 || messageIndex >= msgs.length) return reply.code(400).send({ error: "Invalid message index" });
-        
-        const getMsgName = (m) => m?.name || m?.kwargs?.name || m?.additional_kwargs?.name || undefined;
-        const getMsgRole = (m) => { const t = m?.type || ""; return m?.role || m?.kwargs?.role || (t === "human" ? "user" : getMsgName(m) ? "assistant" : t === "ai" ? "assistant" : "user"); };
+
+        const getMsgName = (m) => {
+            const isHuman = m?.type === "human" || (Array.isArray(m?.id) && m.id.includes("HumanMessage"));
+            if (isHuman) return "";
+            const name = (typeof m?.kwargs?.name === 'string' ? m.kwargs.name : null) || (typeof m?.name === 'string' ? m.name : null) || (typeof m?.additional_kwargs?.name === 'string' ? m.additional_kwargs.name : null) || "";
+            return typeof name === 'string' ? name : "";
+        };
+        const getMsgRole = (m) => { const t = m?.type || ""; if (t === "system" || (Array.isArray(m?.id) && m.id.includes("SystemMessage")) || (getMsgName(m) || "").endsWith("__prompt")) return "system"; return m?.role || m?.kwargs?.role || (t === "human" || (Array.isArray(m?.id) && m.id.includes("HumanMessage")) ? "user" : getMsgName(m) ? "assistant" : t === "ai" ? "assistant" : "user"); };
         const getMsgContent = (m) => m?.content || m?.kwargs?.content || "";
+        if (messageIndex < 0 || messageIndex >= msgs.length) return reply.code(400).send({ error: "Invalid message index" });
 
         const toLangChainMessage = (role, content, name, timestamp) => {
             const fields = { content, name, additional_kwargs: {} };
@@ -507,15 +797,18 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
             return new AIMessage(fields);
         };
 
-        const truncatedMsgs = msgs.slice(0, messageIndex).map(m => {
+        const truncatedMsgs = msgs.slice(0, messageIndex + 1).map((m, idx) => {
             const kwargs = m.kwargs || {};
+            if (idx === messageIndex && newContent !== undefined) {
+                return toLangChainMessage(getMsgRole(m), newContent, getMsgName(m), kwargs.timestamp || m.timestamp);
+            }
             return toLangChainMessage(getMsgRole(m), getMsgContent(m), getMsgName(m), kwargs.timestamp || m.timestamp);
         });
 
-        const rewindMsg = msgs[messageIndex];
-        const rewindRole = getMsgRole(rewindMsg);
-        const rewindName = getMsgName(rewindMsg);
-        const rewindContent = newContent !== undefined ? newContent : getMsgContent(rewindMsg);
+        const rewindRole = getMsgRole(msgs[messageIndex]);
+        const rewindName = getMsgName(msgs[messageIndex]);
+
+        console.error(`[REWIND-DEBUG] rewindMsg.type=${msgs[messageIndex].type} role=${rewindRole} name=${rewindName}`);
 
         const dbw = getCheckpointDB(true);
 
@@ -551,8 +844,19 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
 
         dbw.close();
         
+        const rewindDirective = getMsgContent(truncatedMsgs[0]) || "Rewind";
+        const rewindPreview = rewindDirective.length > 80 ? rewindDirective.slice(0, 80) + "…" : rewindDirective;
         const cfg = { configurable: { thread_id: threadId }, recursionLimit: 100 };
-        if (truncatedMsgs.length > 0) await app.updateState(cfg, { messages: truncatedMsgs });
+        if (process.env.LANGFUSE_SECRET_KEY || process.env.LANGFUSE_PUBLIC_KEY) {
+            console.error(`[LANGFUSE] Creating CallbackHandler for rewind thread ${threadId}`);
+            cfg.callbacks = [new CallbackHandler({
+                sessionId: threadId,
+                userId: "user",
+                publicKey: process.env.LANGFUSE_PUBLIC_KEY,
+                secretKey: process.env.LANGFUSE_SECRET_KEY,
+                baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST
+            })];
+        }
 
         const requestId = `chatcmpl-${uuidv4()}`;
         const job = { events: [], done: false, error: null, listeners: new Set() };
@@ -561,74 +865,150 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         const newAbortController = new AbortController();
         threadAbortControllers[threadId] = newAbortController;
 
-        const emit = (d) => { job.events.push(d); for (const fn of job.listeners) { try { fn(d); } catch {} } };
-        const emitChunk = (content, agent) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content, ...(agent && { agent }) }, finish_reason: null }] });
-
         let lastTokenTime = Date.now();
-        const staleGuard = setInterval(() => { if (Date.now() - lastTokenTime > 600000) { newAbortController.abort(); clearInterval(staleGuard); } }, 10000);
+        const activeAgentSet = new Set(), agentStats = {};
+        const syncActiveAgent = () => { activeThreadAgents[threadId] = { current: [...activeAgentSet][0] || null, queue: [...activeAgentSet] }; };
+
+        const emit = (d) => { 
+            lastTokenTime = Date.now();
+            job.events.push(d); 
+            for (const fn of job.listeners) { try { fn(d); } catch {} } 
+        };
+        const emitChunk = (text, agent) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: text, agent }, finish_reason: null }] });
+
+        const onResearchEvent = (data) => { if (data.threadId === threadId) emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { tool: data, agent: data.agent }, finish_reason: null }] }); };
+        const onResearchPrompt = (data) => { if (data.threadId === threadId) { activeAgentSet.add(data.agent); syncActiveAgent(); emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: data.prompt, agent: data.agent }, finish_reason: null }] }); } };
+        const onResearchChunk = (data) => { if (data.threadId === threadId) emitChunk(data.content, data.agent); };
+        const onResearchStop = (data) => {
+            if (data.threadId === threadId) {
+                emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: data.agent }, finish_reason: "stop" }] }); 
+                activeAgentSet.delete(data.agent);
+                syncActiveAgent();
+            }
+        };
+        researchEvents.on("tool", onResearchEvent);
+        researchEvents.on("prompt", onResearchPrompt);
+        researchEvents.on("chunk", onResearchChunk);
+        researchEvents.on("stop", onResearchStop);
+
+        const staleGuard = setInterval(() => { 
+            if (Date.now() - lastTokenTime > 600000) { 
+                console.error(`[STALE] Aborting rewound thread ${threadId}`);
+                newAbortController.abort(); 
+                clearInterval(staleGuard); 
+            } 
+        }, 10000);
 
         (async () => {
             try {
-                const invokeMsg = toLangChainMessage(rewindRole, rewindContent, rewindName, Date.now());
-                const eventStream = await app.streamEvents({ messages: [invokeMsg] }, { ...cfg, version: "v2", signal: newAbortController.signal });
-                const agentQueue = [], agentBuffers = {}, agentDone = {}, agentHeaders = {}, agentStats = {};
-                let activeAgent = null;
-                const syncActiveAgent = () => { activeThreadAgents[threadId] = { current: activeAgent, queue: [...agentQueue] }; };
+                console.error(`[REWIND] Starting workflow for thread ${threadId} passing ${truncatedMsgs.length} messages directly into streamEvents`);
+                const eventStream = await app.streamEvents(
+                    { messages: truncatedMsgs.length > 0 ? truncatedMsgs : [] },
+                    { ...cfg, version: "v2", signal: newAbortController.signal }
+                );
+                const agentContentBuffers = {};
+                let baClarificationRounds = 0;
+                const researchPromptSent = new Set();
 
                 for await (const event of eventStream) {
                     const eventType = event.event, nodeName = event.metadata?.langgraph_node;
+                    
                     if (!nodeName || nodeName === "__start__" || nodeName === "project_manager") continue;
+                    if (event.tags?.includes("hide_stream") || event.metadata?.tags?.includes("hide_stream")) continue;
                     const validAgents = getActiveAgents();
-                    const isPromptNode = event.name?.endsWith("_prompt") && validAgents.includes(event.name.replace(/_prompt$/, ""));
-                    const resolvedAgentName = isPromptNode ? event.name.replace(/_prompt$/, "") : event.name;
-                    if (eventType === "on_chain_end" && isPromptNode) {
-                        for (const pm of (event.data?.output?.messages || [])) {
-                            const pc = pm.content || pm.kwargs?.content || "";
-                            if (pc) emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: pc, agent: resolvedAgentName }, finish_reason: null }] });
-                        }
-                        continue;
+                    
+                    const actualNodeName = event.metadata?.langgraph_node || "";
+                    const isPromptNode = actualNodeName.endsWith("_prompt") && validAgents.includes(actualNodeName.replace(/_prompt$/, ""));
+                    
+                    console.error(`[STREAM EVENT] type=${eventType} name=${event.name} nodeName=${nodeName} actual=${actualNodeName} prompt=${isPromptNode}`);
+
+                    // Skip prompt nodes entirely in the UI stream
+                    if (isPromptNode) continue;
+
+                    const isResearchNode = actualNodeName.endsWith("_research") && validAgents.includes(actualNodeName.replace(/_research$/, ""));
+                    const resolvedAgentName = isResearchNode ? actualNodeName : actualNodeName;
+
+                    if (eventType === "on_chain_start" && (validAgents.includes(actualNodeName) || isResearchNode)) {
+                        activeAgentSet.add(resolvedAgentName);
+                        syncActiveAgent();
+                        emitChunk("", resolvedAgentName);
                     }
-                    if (eventType === "on_chain_start" && (validAgents.includes(event.name) || isPromptNode)) {
-                        const agentName = resolvedAgentName;
-                        if (!agentQueue.includes(agentName)) { agentQueue.push(agentName); agentBuffers[agentName] = ""; agentDone[agentName] = false; agentHeaders[agentName] = { prompt: null, headerSent: false }; if (!activeAgent) activeAgent = agentName; syncActiveAgent(); }
-                    }
-                    if (eventType === "on_chat_model_start" && validAgents.includes(nodeName)) {
+                    if (eventType === "on_chat_model_start" && (validAgents.includes(actualNodeName) || isResearchNode)) {
+                        lastTokenTime = Date.now(); // Reset stale guard on prefill start
                         const inputMsgs = event.data.input?.messages || [];
                         let prompt = "Processing...";
                         if (inputMsgs.length > 0) { const fm = Array.isArray(inputMsgs[0]) ? inputMsgs[0][0] : inputMsgs[0]; prompt = fm.kwargs?.content || fm.content || prompt; }
-                        agentHeaders[nodeName] = agentHeaders[nodeName] || { prompt: null, headerSent: false };
-                        agentHeaders[nodeName].prompt = prompt.trim();
-                        agentStats[nodeName] = { startTime: Date.now(), tokenCount: 0, promptChars: prompt.length };
-                        agentHeaders[nodeName].headerSent = true;
-                    }
-                    if (eventType === "on_chat_model_stream" && validAgents.includes(nodeName)) {
-                        lastTokenTime = Date.now();
-                        const rawContent = event.data.chunk.content;
-                        if (!rawContent) continue;
-                        if (agentStats[nodeName]) agentStats[nodeName].tokenCount++;
-                        if (activeAgent === nodeName) emitChunk(rawContent, nodeName); else agentBuffers[nodeName] = (agentBuffers[nodeName] || "") + rawContent;
-                    }
-                    if (eventType === "on_chain_end" && validAgents.includes(event.name)) {
-                        const agentName = event.name;
-                        agentDone[agentName] = true;
-                        if (agentStats[agentName]) delete agentStats[agentName];
-                        if (activeAgent === agentName) {
-                            emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: agentName }, finish_reason: "stop" }] });
-                            agentQueue.shift();
-                            while (agentQueue.length > 0) {
-                                const na = agentQueue[0];
-                                activeAgent = na;
-                                const bc = agentBuffers[na];
-                                if (bc) { emitChunk(bc, na); agentBuffers[na] = ""; }
-                                if (agentDone[na]) {
-                                    emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: na }, finish_reason: "stop" }] });
-                                    agentQueue.shift();
-                                } else break;
-                            }
-                            if (agentQueue.length === 0) activeAgent = null;
-                            syncActiveAgent();
+                        agentStats[actualNodeName] = { startTime: Date.now(), tokenCount: 0, promptChars: prompt.length };
+                        
+                        if (!researchPromptSent.has(actualNodeName)) {
+                            researchPromptSent.add(actualNodeName);
+                            emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: prompt, agent: resolvedAgentName }, finish_reason: null }] });
                         }
                     }
+                    if (eventType === "on_chat_model_stream") {
+                        const targetAgent = actualNodeName;
+                        if (targetAgent && (validAgents.includes(targetAgent) || isResearchNode)) {
+                            lastTokenTime = Date.now();
+                            let rawContent = event.data.chunk.content;
+                            if (Array.isArray(rawContent)) rawContent = rawContent.map(c => typeof c === 'string' ? c : (c.text || "")).join("");
+                            if (!rawContent) continue;
+                            if (agentStats[targetAgent]) agentStats[targetAgent].tokenCount++;
+                            if (!agentContentBuffers[targetAgent]) agentContentBuffers[targetAgent] = "";
+                            agentContentBuffers[targetAgent] += rawContent;
+                            emitChunk(rawContent, targetAgent);
+                        }
+                    }
+                    if (eventType === "on_chain_end" && (validAgents.includes(actualNodeName) || isResearchNode)) {
+                        const agentName = resolvedAgentName;
+                        const stats = agentStats[agentName];
+                        if (stats) { const el = ((Date.now() - stats.startTime) / 1000).toFixed(1); process.stderr.write(`[STATS] ${agentName} done: ${stats.tokenCount} tokens in ${el}s (${(stats.tokenCount / (parseFloat(el) || 1)).toFixed(1)} t/s)\n`); delete agentStats[agentName]; }
+                        if (agentContentBuffers[agentName]) {
+                            const statusMatch = agentContentBuffers[agentName].match(/STATUS:\s*(\w+)/);
+                            if (statusMatch) {
+                                const status = statusMatch[1];
+                                if (agentName === "quality_engineer") {
+                                    const scoreMap = { TESTS_PASSED: 1, TESTING_COMPLETE: 1, REJECTED: 0, QUESTION: 0.5, TESTING_AMBIGUOUS: 0.5, TESTING_CLEAR: 0.75 };
+                                    const scoreValue = scoreMap[status] ?? 0.5;
+                                    try {
+                                        const lfHandler = cfg.callbacks?.find(c => c instanceof CallbackHandler);
+                                        const traceId = lfHandler?.traceId;
+                                        const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
+                                        lf.score({ traceId, sessionId: threadId, name: "qe_approval", value: scoreValue, comment: `STATUS: ${status}`, metadata: { agent: "quality_engineer", status } });
+                                        await lf.flushAsync();
+                                        console.error(`[LANGFUSE] QE score: ${status} = ${scoreValue} for thread ${threadId}`);
+                                    } catch (e) { console.error("[LANGFUSE] QE score error:", e.message); }
+                                }
+                                if (agentName === "business_analyst") {
+                                    if (status === "DIRECTIVE_AMBIGUOUS") {
+                                        baClarificationRounds++;
+                                        console.error(`[LANGFUSE] BA clarification round ${baClarificationRounds} for thread ${threadId}`);
+                                    } else if (status === "DIRECTIVE_CLEAR") {
+                                        try {
+                                            const lfHandler = cfg.callbacks?.find(c => c instanceof CallbackHandler);
+                                            const traceId = lfHandler?.traceId;
+                                            const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
+                                            lf.score({ traceId, sessionId: threadId, name: "clarification_rounds", value: baClarificationRounds, comment: baClarificationRounds === 0 ? "No clarification needed" : `${baClarificationRounds} round(s) before clear`, metadata: { agent: "business_analyst" } });
+                                            await lf.flushAsync();
+                                            console.error(`[LANGFUSE] BA clarification_rounds: ${baClarificationRounds} for thread ${threadId}`);
+                                        } catch (e) { console.error("[LANGFUSE] BA score error:", e.message); }
+                                    }
+                                }
+                            }
+                        }
+                        delete agentContentBuffers[agentName];
+                        emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", agent: agentName }, finish_reason: "stop" }] });
+                        activeAgentSet.delete(agentName);
+                        syncActiveAgent();
+                        if (threadPauseRequested[threadId] && activeAgentSet.size === 0) {
+                            const activeJobs = Object.entries(agentStats).map(([name, stats]) => {
+                                const duration = ((Date.now() - stats.startTime) / 1000).toFixed(1);
+                                return `${name} (${duration}s, ${stats.tokenCount} tokens)`;
+                            }).join(", ");
+                            console.error(`[PAUSE] All agents drained for thread ${threadId}, pausing workflow. Active jobs: ${activeJobs || "none"}`);
+                            newAbortController.abort();
+                        }
+                    }
+
                 }
                 emit({ id: requestId, object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
                 emit("[DONE]");
@@ -637,7 +1017,31 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                     console.error("Stream Error:", error); job.error = error.message;
                 }
             } finally {
-                job.done = true; activeThreads.delete(threadId); delete activeThreadAgents[threadId]; delete threadAbortControllers[threadId]; clearInterval(staleGuard);
+                researchEvents.off("tool", onResearchEvent);
+                researchEvents.off("prompt", onResearchPrompt);
+                researchEvents.off("chunk", onResearchChunk);
+                researchEvents.off("stop", onResearchStop);
+                const lfHandler = cfg.callbacks?.find(c => c instanceof CallbackHandler);
+                if (lfHandler) {
+                    try {
+                        await lfHandler.flushAsync();
+                        const traceId = lfHandler.traceId;
+                        if (traceId) {
+                            const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
+                            lf.trace({
+                                id: traceId,
+                                name: rewindPreview,
+                                sessionId: threadId,
+                                input: rewindDirective,
+                                output: job.error ? { error: job.error } : { status: "completed" },
+                                tags: ["ai-it", "rewind"],
+                                metadata: { thread_id: threadId, rewind_from: rewindName, directive: rewindDirective }
+                            });
+                            await lf.flushAsync();
+                        }
+                    } catch (e) { console.error("[LANGFUSE] Flush error:", e.message); }
+                }
+                job.done = true; activeThreads.delete(threadId); delete activeThreadAgents[threadId]; delete threadAbortControllers[threadId]; delete threadPauseRequested[threadId]; clearInterval(staleGuard);
                 setTimeout(() => { delete workflowJobs[threadId]; }, 300000);
             }
         })();
@@ -647,6 +1051,52 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         console.error("[ADMIN] Rewind error:", e);
         return reply.code(500).send({ error: e.message });
     }
+});
+
+// ── MCP Tools (Streamable HTTP) ───────────────────────────────────────────────
+// Each session gets its own McpServer + transport pair
+const mcpSessions = {};
+
+async function createMcpSession() {
+    const mcpServer = new McpServer({ name: "ai-it-tools", version: "1.0.0" });
+    registerTools(mcpServer);
+    const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        onsessioninitialized: (sid) => { mcpSessions[sid] = transport; },
+    });
+    transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) delete mcpSessions[sid];
+    };
+    await mcpServer.connect(transport);
+    return transport;
+}
+
+server.post("/mcp", async (request, reply) => {
+    const sid = request.headers["mcp-session-id"];
+    let transport = sid ? mcpSessions[sid] : null;
+    if (!transport) {
+        transport = await createMcpSession();
+    }
+    reply.hijack();
+    await transport.handleRequest(request.raw, reply.raw, request.body);
+});
+
+server.get("/mcp", async (request, reply) => {
+    const sid = request.headers["mcp-session-id"];
+    const transport = mcpSessions[sid];
+    if (!transport) return reply.code(400).send({ error: "No active MCP session. Send a POST to /mcp first." });
+    reply.hijack();
+    await transport.handleRequest(request.raw, reply.raw);
+});
+
+server.delete("/mcp", async (request, reply) => {
+    const sid = request.headers["mcp-session-id"];
+    const transport = mcpSessions[sid];
+    if (!transport) return reply.code(400).send({ error: "No active MCP session." });
+    reply.hijack();
+    await transport.handleRequest(request.raw, reply.raw);
+    delete mcpSessions[sid];
 });
 
 // ── Lifecycle ────────────────────────────────────────────────────────────────

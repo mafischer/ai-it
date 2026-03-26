@@ -1,10 +1,23 @@
 # NodeJS dependencies
 node_modules
 
-# check points
+# cdb
 checkpoints.db*
+web_cache.db*
+*.db
+
 
 # logs
 *.log
 *.err
 *.out
+
+# open code
+session-*.md
+
+# e2e tests
+playwright-report/
+test-results/
+
+# debugging
+test-*.js

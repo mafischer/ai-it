@@ -21,12 +21,23 @@ export async function initConfig() {
     return _config;
 }
 
+function resolveEnvVar(value) {
+    if (typeof value === "string" && value.startsWith("${")) {
+        const envKey = value.slice(2, -1);
+        return process.env[envKey] || value;
+    }
+    return value;
+}
+
 function resolveEnvVars(cfg) {
     if (!cfg.engines) return;
     for (const engine of Object.values(cfg.engines)) {
-        if (engine.url && engine.url.startsWith("${")) {
-            const envKey = engine.url.slice(2, -1);
-            engine.url = process.env[envKey] || engine.url;
+        if (engine.url) {
+            if (Array.isArray(engine.url)) {
+                engine.url = engine.url.map(u => resolveEnvVar(u));
+            } else {
+                engine.url = resolveEnvVar(engine.url);
+            }
         }
         if (engine.apiKey && engine.apiKey.startsWith("${")) {
             const envKey = engine.apiKey.slice(2, -1);
@@ -40,7 +51,8 @@ async function discoverEngines(cfg) {
     for (const [engineId, engine] of Object.entries(cfg.engines)) {
         if (!engine.discover) continue;
         try {
-            const resp = await fetch(`${engine.url}/models`, {
+            const discoveryUrl = Array.isArray(engine.url) ? engine.url[0] : engine.url;
+            const resp = await fetch(`${discoveryUrl}/models`, {
                 headers: engine.apiKey ? { "Authorization": `Bearer ${engine.apiKey}` } : {},
                 signal: AbortSignal.timeout(5000),
             });

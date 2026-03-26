@@ -1,47 +1,37 @@
-import { app } from "./index.js";
+import { HumanMessage } from "@langchain/core/messages";
+import { app, initConfig } from "./index.js";
+import { v4 as uuidv4 } from "uuid";
 
-async function main() {
-  const directive = "Create a platform to sell cars";
-  
-  console.log(`\n🚀 Starting AI-IT Organization...`);
-  console.log(`📝 Directive: "${directive}"\n`);
+async function run() {
+    await initConfig();
+    const threadId = uuidv4().substring(0, 12);
+    const directive = process.argv[2] || "Create a hello world app in Python";
+    
+    console.log(`[TEST] Starting workflow for thread ${threadId}`);
+    console.log(`[TEST] Directive: ${directive}`);
 
-  const config = { configurable: { thread_id: "1" } };
-  
-  const eventStream = await app.streamEvents(
-    {
-      messages: [{ role: "user", content: directive }],
-    },
-    { ...config, version: "v2" }
-  );
+    const config = { configurable: { thread_id: threadId }, recursionLimit: 100 };
+    const stream = await app.streamEvents(
+        { messages: [new HumanMessage({ content: directive, timestamp: Date.now() })] }, 
+        { ...config, version: "v2" }
+    );
 
-  for await (const event of eventStream) {
-    const eventType = event.event;
-
-    // Capture token stream from ALL agents (including PM reasoning)
-    if (eventType === "on_chat_model_stream") {
-      const content = event.data.chunk.content;
-      if (content) {
-        process.stdout.write(content);
-      }
-    }
-
-    // Detect when a node ends to print a clean separator
-    if (eventType === "on_chain_end" && event.name && event.name.endsWith("Node")) {
-        console.log("\n" + "─".repeat(50));
-    }
-
-    // Print final PM decision metadata in yellow when it finishes
-    if (eventType === "on_chain_end" && event.name === "project_manager") {
-        const output = event.data.output;
-        if (output && output.next_agent) {
-            console.log(`\n\x1b[33m[PM DECISION]: Route to ${output.next_agent}. Logic: ${output.pm_reasoning}\x1b[0m`);
-            console.log("─".repeat(50));
+    for await (const event of stream) {
+        const eventType = event.event;
+        const nodeName = event.metadata?.langgraph_node;
+        
+        if (eventType === "on_chat_model_stream") {
+            const content = event.data.chunk.content;
+            if (content) {
+                process.stdout.write(typeof content === "string" ? content : JSON.stringify(content));
+            }
+        } else if (eventType === "on_chain_start") {
+            if (nodeName && !nodeName.endsWith("_prompt")) {
+                console.log(`\n\n--- [AGENT: ${nodeName}] ---`);
+            }
         }
     }
-  }
-
-  console.log("\n✅ AI-IT Workflow Complete.\n");
+    console.log("\n\n[TEST] Workflow complete.");
 }
 
-main().catch(console.error);
+run().catch(console.error);

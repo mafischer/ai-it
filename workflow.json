@@ -3,24 +3,28 @@
 
   "engines": {
     "lm-studio": {
-      "url": "http://localhost:1234/v1",
+      "url": ["http://localhost:1234/v1"],
       "capabilities": ["text", "reasoning"]
     },
     "llama-server": {
-      "url": "http://10.3.0.241:8080/v1",
+      "url": ["http://10.3.0.241:8080/v1"],
       "apiKey": "${LFM2_8B_KEY}",
       "discover": true
+    },
+    "olmx": {
+      "url": ["http://localhost:8001/v1"],
+      "capabilities": ["text", "reasoning"]
     }
   },
 
   "models": {
-    "specialist": { "engine": "lm-studio", "modelId": "qwen3.5-27b" },
+    "specialist": { "engine": "olmx", "modelId": "Qwen3.5-27B-5bit" },
     "router":     { "engine": "llama-server", "modelId": "lfm2-8b" }
   },
 
   "pipeline": {
     "entry": "business_analyst",
-    "question_statuses": ["DIRECTIVE_AMBIGUOUS", "QUESTION"],
+    "question_statuses": ["DIRECTIVE_AMBIGUOUS", "REQUIREMENTS_AMBIGUOUS", "QUESTION"],
     "maxClarificationRounds": 5
   },
 
@@ -28,7 +32,7 @@
     "business_analyst": {
       "role": "Business Analyst",
       "emoji": "📋",
-      "mission": "Extract technical requirements from the USER directive.",
+      "mission": "Extract business requirements and user stories from the USER directive.",
       "model": "specialist",
       "requires": ["text", "reasoning"],
       "prompts": ["main", "continue", "approval", "query"]

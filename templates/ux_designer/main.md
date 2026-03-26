@@ -26,8 +26,9 @@ The following clarifications were gathered:
 
 {{/clarificationHistory}}
 
-Incorporate ALL clarifications above into your output.
+Incorporate ALL clarifications above into your output. The clarification phase is now complete. For any remaining gaps or ambiguities that were not fully resolved, use your professional judgment informed by industry standards and best practices to fill them in.
 {{/hasClarifications}}
+
 
 ## Requirements
 {{input}}

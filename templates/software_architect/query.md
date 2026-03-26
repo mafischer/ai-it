@@ -30,10 +30,10 @@ The following clarification rounds have occurred:
 {{/clarificationHistory}}
 
 {{#clarificationsExhausted}}
-**IMPORTANT: This is round {{clarificationRound}} of {{maxClarificationRounds}}. You have exhausted your allotment of clarification rounds. You are NOT allowed to ask further questions. You MUST end with "STATUS: REQUIREMENTS_CLEAR" and proceed with the information you have.**
+**IMPORTANT: This is round {{clarificationRound}} of {{maxClarificationRounds}}. You have exhausted your allotment of clarification rounds. You are NOT allowed to ask further questions. You MUST end with "STATUS: REQUIREMENTS_CLEAR" and proceed with the information you have. For any remaining gaps or ambiguities, fill them in using your best judgment based on industry standards, best practices, and your professional intuition.**
 {{/clarificationsExhausted}}
 {{^clarificationsExhausted}}
-You have used {{clarificationRound}} of {{maxClarificationRounds}} clarification rounds ({{clarificationsRemaining}} remaining). Review the full history above. If all ambiguities are now resolved, end with "STATUS: REQUIREMENTS_CLEAR". If further clarification is still needed, ask only NEW questions (do not repeat questions already answered) and end with "STATUS: REQUIREMENTS_AMBIGUOUS".
+You have completed {{clarificationRound}} of {{maxClarificationRounds}} clarification rounds. You are currently on round {{nextRoundNumber}} (you have {{clarificationsRemaining}} round(s) remaining to ask questions). Review the full history above. If all ambiguities are now resolved, end with "STATUS: REQUIREMENTS_CLEAR". If further clarification is still needed, ask only NEW questions (do not repeat questions already answered) and end with "STATUS: REQUIREMENTS_AMBIGUOUS".
 {{/clarificationsExhausted}}
 {{/hasClarifications}}
 

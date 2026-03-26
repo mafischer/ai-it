@@ -29,7 +29,17 @@ const EMOJIS = {
 };
 
 function agentName(id) {
-  return (id || "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  if (typeof id !== 'string') id = String(id || "");
+  let name = id.replace(/_research_phase_2_\d+$/, "").replace(/_research_phase_2$/, "").replace(/_research$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  if (id?.match(/_research_phase_2_(\d+)$/)) {
+    const num = id.match(/_research_phase_2_(\d+)$/)[1];
+    return `${name} Research Phase 2 - Link ${num}`;
+  }
+  if (id?.endsWith("_research_phase_2")) return `${name} Research Phase 2`;
+  if (id?.endsWith("_research")) return `${name} Research Phase 1`;
+  const toolEligible = ["business_analyst", "software_architect", "ux_designer"];
+  if (toolEligible.includes(id)) return `${name} Drafting Phase 3`;
+  return name;
 }
 
 function statusColor(status) {
@@ -47,18 +57,21 @@ function extractStatus(content) {
 // ── Thread List ──────────────────────────────────────────────────────────────
 const ThreadList = {
   template: `
-    <v-container fluid>
-      <div class="d-flex align-center mb-6">
-        <v-icon size="32" color="primary" class="mr-3" style="cursor:pointer" @click="$router.push('/')">mdi-brain</v-icon>
-        <h1 class="text-h4 font-weight-bold">AI-IT Conversations</h1>
-        <v-spacer />
-        <v-btn color="error" variant="outlined" prepend-icon="mdi-delete-sweep" @click="deleteAll" :disabled="!threads.length">
-          Delete All
-        </v-btn>
+    <div class="d-flex flex-column" style="min-height: 100%;">
+      <div class="pa-4 border-b" style="position: sticky; top: 0; z-index: 100; background-color: #1e1e2e; box-shadow: 0 2px 10px rgba(0,0,0,0.5);">
+        <div class="d-flex align-center">
+          <v-icon size="32" color="primary" class="mr-3" style="cursor:pointer" @click="$router.push('/')">mdi-brain</v-icon>
+          <h1 class="text-h4 font-weight-bold">AI-IT Conversations</h1>
+          <v-spacer />
+          <v-btn color="error" variant="outlined" prepend-icon="mdi-delete-sweep" @click="deleteAll" :disabled="!threads.length">
+            Delete All
+          </v-btn>
+        </div>
       </div>
 
-      <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
-
+      <div class="pa-4">
+        <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
+...
       <v-card v-if="!loading && !threads.length" variant="tonal" color="surface-variant" class="pa-8 text-center">
         <v-icon size="48" color="grey">mdi-chat-sleep-outline</v-icon>
         <div class="text-body-1 mt-3 text-grey">No conversations yet.</div>
@@ -86,7 +99,7 @@ const ThreadList = {
           </div>
         </v-card>
       </div>
-    </v-container>
+    </div>
   `,
   setup() {
     const threads = ref([]);
@@ -224,79 +237,146 @@ const ThreadList = {
 // ── Thread Detail ────────────────────────────────────────────────────────────
 const ThreadDetail = {
   template: `
-    <v-container fluid>
-      <v-btn variant="text" prepend-icon="mdi-arrow-left" @click="$router.push('/admin')" class="mb-3">All Conversations</v-btn>
+    <div class="d-flex flex-column" style="min-height: 100%;">
+      <!-- Sticky Header Panel -->
+      <div class="pa-4 border-b" style="position: sticky; top: 0; z-index: 100; background-color: #1e1e2e; box-shadow: 0 2px 10px rgba(0,0,0,0.5);">
+        <v-btn variant="text" prepend-icon="mdi-arrow-left" @click="$router.push('/admin')" class="mb-3">All Conversations</v-btn>
 
-      <div class="d-flex align-center mb-4">
-        <h1 class="text-h5 font-weight-bold">Thread {{ threadId }}</h1>
-        <v-progress-circular v-if="active" indeterminate size="20" width="2" color="primary" class="ml-3" />
-        <v-spacer />
-        <v-btn v-if="active" color="error" variant="flat" prepend-icon="mdi-stop" @click="abortThread">Abort</v-btn>
+        <div class="d-flex align-center mb-4">
+          <h1 class="text-h5 font-weight-bold">{{ threadTitle || threadId }}</h1>
+          <code class="text-caption text-medium-emphasis ml-2">{{ threadId }}</code>
+          <v-progress-circular v-if="active" indeterminate size="20" width="2" color="primary" class="ml-3" />
+          <v-spacer />
+        </div>
+
+        <div class="d-flex align-center">
+          <v-chip variant="tonal" size="small" prepend-icon="mdi-database" class="mr-3">
+            {{ messages.length }} messages
+          </v-chip>
+          <v-spacer></v-spacer>
+          <v-btn size="small" variant="tonal" :prepend-icon="allExpanded ? 'mdi-collapse-all' : 'mdi-expand-all'" @click="toggleAllMessages">
+            {{ allExpanded ? 'Collapse All' : 'Expand All' }}
+          </v-btn>
+          <v-btn v-if="active" size="small" variant="tonal" color="error" class="ml-2"
+            prepend-icon="mdi-stop"
+            @click="abortThread">
+            Abort
+          </v-btn>
+          <v-btn v-if="messages.length > 0" size="small" variant="tonal" class="ml-2"
+            :prepend-icon="pausing ? 'mdi-timer-sand' : (active ? 'mdi-pause' : 'mdi-play')"
+            :disabled="pausing"
+            :loading="pausing"
+            @click="active ? pauseThread() : resumeThread()">
+            {{ pausing ? 'Pausing...' : (active ? 'Pause' : 'Resume') }}
+          </v-btn>
+        </div>
       </div>
 
-      <div class="d-flex align-center mb-4">
-        <v-chip variant="tonal" size="small" prepend-icon="mdi-database">
-          {{ messages.length }} messages in latest state
-        </v-chip>
-        <v-spacer></v-spacer>
-        <v-btn size="small" variant="tonal" :prepend-icon="allExpanded ? 'mdi-collapse-all' : 'mdi-expand-all'" @click="toggleAllMessages">
-          {{ allExpanded ? 'Collapse All' : 'Expand All' }}
-        </v-btn>
-      </div>
+      <!-- Message List -->
+      <div class="pa-4" style="background-color: #0f0f0f; min-height: 100vh;">
+        <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
 
-      <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
+        <div v-for="(m, i) in messages" :key="i" class="mb-3">
+          <v-card class="w-100 cursor-pointer"
+            :border="m.role === 'user' ? 'success sm' : 'info sm'" elevation="3" @click="toggleMessage(m)">
+            <div class="d-flex align-center justify-space-between pa-1 border-b opacity-70" style="background: rgba(0,0,0,0.05); z-index: 20;">
+              <div class="d-flex align-center ml-1">
+                <v-chip :color="m.role === 'user' ? 'success' : (m.role === 'system' ? 'warning' : 'primary')" :variant="m.role === 'system' ? 'tonal' : 'flat'" size="x-small" class="mr-2">
+                  {{ msgEmoji(m) }} <template v-if="m.role === 'system'">System prompt to {{ agentName(m.name) }}</template><template v-else-if="m.role === 'user'">User</template><template v-else>{{ agentName(m.name) || m.role }}</template>
+                </v-chip>
+                <v-progress-circular v-if="m._streaming" indeterminate size="12" width="1.5" color="primary"></v-progress-circular>
+                <v-chip v-if="msgStatus(m)" :color="statusColor(msgStatus(m))" size="x-small" variant="tonal" class="ml-2">
+                  {{ msgStatus(m) }}
+                </v-chip>
+              </div>
+              <div class="d-flex align-center ga-1">
+                <template v-if="m.role === 'assistant' && m.name">
+                  <v-icon v-for="s in 5" :key="'star-'+i+'-'+s" size="x-small"
+                    :color="s <= (m._rating || 0) ? 'amber' : 'grey-darken-1'"
+                    @click.stop="rateMessage(i, s)"
+                    style="cursor:pointer"
+                    :title="s + ' star' + (s > 1 ? 's' : '')">
+                    {{ s <= (m._rating || 0) ? 'mdi-star' : 'mdi-star-outline' }}
+                  </v-icon>
+                  <div style="width:8px"></div>
+                </template>
+                <v-btn icon size="x-small" variant="text" color="primary" @click.stop="copyToClipboard(m.content)" title="Copy text">
+                  <v-icon>mdi-content-copy</v-icon>
+                </v-btn>
+                <v-btn icon size="x-small" variant="text" color="primary" @click.stop="openEdit(i)" title="Edit and restart">
+                  <v-icon>mdi-pencil</v-icon>
+                </v-btn>
+                <v-btn icon size="x-small" variant="text" color="primary" @click.stop="rewind(i)" title="Rewind to this point">
+                  <v-icon>mdi-skip-backward</v-icon>
+                </v-btn>
+                <v-btn icon size="x-small" variant="text" color="secondary" @click.stop="cloneAt(i)" title="Clone thread up to here">
+                  <v-icon>mdi-source-fork</v-icon>
+                </v-btn>
+                <v-icon size="x-small" class="mr-1">
+                  {{ m._msgOpen === false ? 'mdi-chevron-down' : 'mdi-chevron-up' }}
+                </v-icon>
+              </div>
+            </div>
+            <v-card-text class="pa-3">
+              <div v-show="m._msgOpen !== false">
+                <!-- Thinking / Research section -->
+                <v-card v-if="m._thinking || (m._toolActivities && m._toolActivities.length)" variant="outlined" class="mb-2" rounded="lg" @click.stop>
+                  <v-card-text class="pa-2">
+                    <div class="d-flex align-center cursor-pointer" @click.stop="m._thinkOpen = !m._thinkOpen; m._userToggledThink = true">
+                      <v-icon size="small" class="mr-2">{{ m._thinkOpen ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
+                      <span class="text-caption text-medium-emphasis">
+                        <template v-if="m._toolActivities && m._toolActivities.some(a => a.status === 'running')">Researching</template>
+                        <template v-else>{{ m._thinking ? 'Thinking' : 'Research' }}</template>
+                      </span>
+                      <v-progress-circular v-if="m._toolActivities && m._toolActivities.some(a => a.status === 'running')" indeterminate size="14" width="2" color="primary" class="ml-2" />
+                    </div>
+                    <div v-if="m._thinkOpen">
+                      <div v-if="m._toolActivities && m._toolActivities.length" class="mt-2">
+                        <div v-if="m._toolActivities.some(a => a.type === 'search')" class="mb-2">
+                          <div class="text-caption text-medium-emphasis font-weight-bold mb-1" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em">
+                            <v-icon size="12" class="mr-1">mdi-magnify</v-icon>Searches
+                          </div>
+                          <div v-for="(ta, ti) in m._toolActivities.filter(a => a.type === 'search')" :key="'s'+ti" class="d-flex align-center mb-1" style="font-size:0.8rem">
+                            <a :href="'https://duckduckgo.com/?q=' + encodeURIComponent(ta.query)" target="_blank" rel="noopener" class="text-medium-emphasis tool-link" @click.stop>{{ ta.query }}</a>
+                            <v-progress-circular v-if="ta.status === 'running'" indeterminate size="12" width="1" color="primary" class="ml-2" />
+                            <v-chip v-if="ta.status === 'complete' && ta.results" size="x-small" variant="tonal" class="ml-2">{{ ta.results.length }} results</v-chip>
+                          </div>
+                        </div>
+                        <div v-if="m._toolActivities.some(a => a.type === 'fetch')" class="mb-2">
+                          <div class="text-caption text-medium-emphasis font-weight-bold mb-1" style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em">
+                            <v-icon size="12" class="mr-1">mdi-web</v-icon>Pages
+                          </div>
+                          <div v-for="(ta, ti) in m._toolActivities.filter(a => a.type === 'fetch')" :key="'f'+ti" class="d-flex align-center mb-1" style="font-size:0.8rem">
+                            <img v-if="ta.favicon" :src="ta.favicon" width="16" height="16" class="mr-2" style="border-radius:2px" />
+                            <v-icon v-else size="14" class="mr-2" :color="ta.status === 'running' ? 'primary' : 'success'">mdi-web</v-icon>
+                            <a :href="ta.url" target="_blank" rel="noopener" class="text-medium-emphasis tool-link" :title="ta.url" @click.stop>{{ ta.title || ta.domain || ta.url }}</a>
+                            <v-progress-circular v-if="ta.status === 'running'" indeterminate size="12" width="1" color="primary" class="ml-2" />
+                            <v-icon v-if="ta.status === 'complete'" size="14" color="success" class="ml-1">mdi-check</v-icon>
+                          </div>
+                        </div>
+                      </div>
+                      <div v-if="m._thinking" class="md-content mt-2 text-medium-emphasis" style="font-size:0.8rem" v-html="renderMd(m._thinking)"></div>
+                    </div>
+                  </v-card-text>
+                </v-card>
+                <div class="md-content" v-html="renderMd(m._displayContent || m.content)"></div>
+              </div>
+            </v-card-text>
+          </v-card>
+        </div>
 
-      <div v-for="(m, i) in messages" :key="i" class="mb-3">
-        <v-card class="w-100"
-          :border="m.role === 'user' ? 'success sm' : 'info sm'" elevation="3">
+        <!-- Skeleton for active processing -->
+        <v-card v-if="active" border="info sm" elevation="3" class="mb-3">
           <v-card-text>
-            <div class="d-flex align-center mb-2" style="cursor: pointer;" @click="m._msgOpen = m._msgOpen === false ? true : false">
-              <v-chip :color="m.role === 'user' ? 'success' : (m.role === 'system' ? 'warning' : 'primary')" :variant="m.role === 'system' ? 'tonal' : 'flat'" size="small" class="mr-2">
-                {{ msgEmoji(m) }} <template v-if="m.role === 'system'">System prompt to {{ agentName(m.name) }}</template><template v-else>{{ agentName(m.name) || m.role }}</template>
+            <div class="d-flex align-center mb-3">
+              <v-chip color="primary" variant="flat" size="small">
+                {{ activeAgent ? (emoji(activeAgent) + ' ' + agentName(activeAgent)) : 'Processing' }}...
               </v-chip>
-              <v-progress-circular v-if="m._streaming" indeterminate size="16" width="2" color="primary" class="mr-2"></v-progress-circular>
-              <v-chip v-if="msgStatus(m)" :color="statusColor(msgStatus(m))" size="x-small" variant="tonal" class="mr-2">
-                {{ msgStatus(m) }}
-              </v-chip>
-              <v-spacer></v-spacer>
-              <v-btn icon size="x-small" variant="text" color="primary" @click.stop="openEdit(i)" title="Edit and restart" class="mr-1">
-                <v-icon>mdi-pencil</v-icon>
-              </v-btn>
-              <v-btn icon size="x-small" variant="text" color="primary" @click.stop="rewind(i)" title="Rewind to this point" class="mr-1">
-                <v-icon>mdi-skip-backward</v-icon>
-              </v-btn>
-              <v-btn icon size="x-small" variant="text" @click.stop="m._msgOpen = m._msgOpen === false ? true : false">
-                <v-icon>{{ m._msgOpen === false ? 'mdi-chevron-down' : 'mdi-chevron-up' }}</v-icon>
-              </v-btn>
             </div>
-            <div v-show="m._msgOpen !== false">
-              <!-- Thinking section (parsed from <think> tags in content) -->
-              <v-card v-if="m._thinking" variant="outlined" class="mb-2" rounded="lg">
-                <v-card-text class="pa-2">
-                  <div class="d-flex align-center cursor-pointer" @click="m._thinkOpen = !m._thinkOpen; m._userToggledThink = true">
-                    <v-icon size="small" class="mr-2">{{ m._thinkOpen ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
-                    <span class="text-caption text-medium-emphasis">Thinking</span>
-                  </div>
-                  <div v-if="m._thinkOpen" class="md-content mt-2 text-medium-emphasis" style="font-size:0.8rem" v-html="renderMd(m._thinking)"></div>
-                </v-card-text>
-              </v-card>
-              <div class="md-content" v-html="renderMd(m._displayContent || m.content)"></div>
-            </div>
+            <v-skeleton-loader type="paragraph" />
           </v-card-text>
         </v-card>
       </div>
-
-      <!-- Skeleton for active processing -->
-      <v-card v-if="active" border="info sm" elevation="3" class="mb-3">
-        <v-card-text>
-          <div class="d-flex align-center mb-3">
-            <v-chip color="primary" variant="flat" size="small">
-              {{ activeAgent ? (emoji(activeAgent) + ' ' + agentName(activeAgent)) : 'Processing' }}...
-            </v-chip>
-          </div>
-          <v-skeleton-loader type="paragraph" />
-        </v-card-text>
-      </v-card>
 
       <!-- Edit Dialog -->
       <v-dialog v-model="editDialogOpen" max-width="800px" persistent>
@@ -324,7 +404,7 @@ const ThreadDetail = {
           </v-card-actions>
         </v-card>
       </v-dialog>
-    </v-container>
+    </div>
   `,
   setup() {
     const route = useRoute();
@@ -333,12 +413,14 @@ const ThreadDetail = {
     const loading = ref(true);
     const active = ref(false);
     const activeAgent = ref(null);
+    const threadTitle = ref("");
     const editDialogOpen = ref(false);
     const editContent = ref("");
     const editIndex = ref(-1);
     let poll;
 
     function parseThinking(content) {
+      if (typeof content !== 'string') content = String(content || "");
       if (!content) return { thinking: null, display: content };
       const match = content.match(/<think>([\s\S]*?)<\/think>/);
       if (match) {
@@ -348,6 +430,17 @@ const ThreadDetail = {
     }
 
     let isStreaming = false;
+
+    async function fetchTitle() {
+      try {
+        const r = await fetch("/api/threads");
+        if (r.ok) {
+          const threads = await r.json();
+          const t = threads.find(th => th.thread_id === threadId);
+          if (t) threadTitle.value = t.title || "";
+        }
+      } catch {}
+    }
 
     async function fetchMessages() {
       if (isStreaming) return; // Don't clobber state while streaming
@@ -360,14 +453,24 @@ const ThreadDetail = {
           messages.value = msgs.map((m, i) => {
             const { thinking, display } = parseThinking(m.content);
             const prev = existing.get(i);
-            // Preserve user-toggled state if content hasn't changed
-            if (prev && prev.content === m.content) {
+            if (prev && prev.role === m.role && prev.name === m.name) {
+              prev.content = m.content;
+              prev.thinking = thinking;
               prev._thinking = thinking;
               prev._displayContent = display;
-              if (prev._msgOpen === undefined) prev._msgOpen = false;
               return prev;
             }
-            return { ...m, _thinking: thinking, _displayContent: display, _thinkOpen: false, _msgOpen: false, _streaming: false, _timestamp: m.timestamp ? new Date(m.timestamp) : new Date() };
+            return reactive({
+              ...m,
+              thinking,
+              _thinking: thinking,
+              _displayContent: display,
+              _thinkOpen: false,
+              _msgOpen: true,
+              _streaming: false,
+              _rating: m.rating || 0,
+              _timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
+            });
           });
         }
       } catch {} finally { loading.value = false; }
@@ -397,6 +500,11 @@ const ThreadDetail = {
       messages.value.forEach(m => m._msgOpen = targetState);
     }
 
+    function toggleMessage(m) {
+      if (window.getSelection().toString()) return;
+      m._msgOpen = m._msgOpen === false ? true : false;
+    }
+
     function openEdit(i) {
       editIndex.value = i;
       editContent.value = messages.value[i].content;
@@ -417,14 +525,89 @@ const ThreadDetail = {
 
     async function rewind(i) {
       if (!confirm("Rewind to message " + i + " and re-run?")) return;
-      const r = await fetch("/api/threads/" + threadId + "/rewind", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messageIndex: i })
-      });
-      const d = await r.json();
-      alert(d.message || d.error);
-      pollAll();
+      try {
+        const r = await fetch("/api/threads/" + threadId + "/rewind", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messageIndex: i })
+        });
+        const d = await r.json();
+        if (d.error) alert(d.error);
+        else console.log("Rewind success:", d.message);
+        pollAll();
+      } catch (e) {
+        alert("Rewind failed: " + e.message);
+      }
     }
+
+    const router = useRouter();
+
+    async function copyToClipboard(text) {
+      try {
+        await navigator.clipboard.writeText(text || "");
+      } catch (err) {
+        console.error('Failed to copy: ', err);
+      }
+    }
+
+    async function rateMessage(index, stars) {
+      const m = messages.value[index];
+      m._rating = stars;
+      try {
+        await fetch(`/api/threads/${threadId}/messages/${index}/score`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rating: stars, agentName: m.name })
+        });
+      } catch (e) { console.error("Rating failed:", e); }
+    }
+
+    async function cloneAt(i) {
+      if (!confirm("Clone thread up to message " + i + " into a new thread?")) return;
+      try {
+        const r = await fetch("/api/threads/" + threadId + "/clone", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messageIndex: i })
+        });
+        const d = await r.json();
+        if (d.error) { alert(d.error); return; }
+        router.push("/admin/thread/" + d.thread_id);
+      } catch (e) {
+        alert("Clone failed: " + e.message);
+      }
+    }
+
+    const pausing = ref(false);
+
+    async function resumeThread() {
+      try {
+        pausing.value = false;
+        const r = await fetch("/api/threads/" + threadId + "/resume", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: "{}"
+        });
+        const d = await r.json();
+        if (d.error) { alert(d.error); return; }
+        pollAll();
+      } catch (e) {
+        alert("Resume failed: " + e.message);
+      }
+    }
+
+    async function pauseThread() {
+      try {
+        const r = await fetch("/api/threads/" + threadId + "/pause", { method: "POST" });
+        const d = await r.json();
+        if (d.error) { alert(d.error); return; }
+        pausing.value = true;
+      } catch (e) {
+        alert("Pause failed: " + e.message);
+      }
+    }
+
+    // Clear pausing state when workflow actually stops
+    watch(active, (nowActive) => {
+      if (!nowActive) pausing.value = false;
+    });
 
     async function abortThread() {
       if (!confirm("Abort active workflow?")) return;
@@ -432,6 +615,7 @@ const ThreadDetail = {
       const r = await fetch("/api/threads/" + threadId + "/abort", { method: "POST" });
       const d = await r.json();
       alert(d.message || d.error);
+      pausing.value = false;
       pollAll();
     }
 
@@ -450,9 +634,7 @@ const ThreadDetail = {
         }
         activeStreamStates[agentId] = {
           msg: streamMsg,
-          inThink: !!streamMsg._thinking,
-          thinkBuf: streamMsg._thinking || "",
-          contentBuf: streamMsg._displayContent || ""
+          fullBuf: (streamMsg._thinking ? ("<think>" + streamMsg._thinking + "</think>") : "") + (streamMsg._displayContent || "")
         };
       }
       return activeStreamStates[agentId];
@@ -469,11 +651,32 @@ const ThreadDetail = {
 
         const exists = messages.value.some(m => m.type === "prompt" && m.name === agentId && m.content === deltaObj.system_prompt);
         if (!exists) {
-          messages.value.push(reactive({ role: "system", name: agentId, content: deltaObj.system_prompt, type: "prompt", _thinking: null, _displayContent: deltaObj.system_prompt, _thinkOpen: false }));
-          triggerRef(messages);
+          messages.value.push(reactive({ 
+            role: "system", name: agentId, content: deltaObj.system_prompt, type: "prompt", 
+            _thinking: null, _displayContent: deltaObj.system_prompt, _thinkOpen: false, _streaming: false,
+            _msgOpen: true, _timestamp: new Date()
+          }));
+          
         }
         
         getStreamState(agentId, true);
+        return;
+      }
+
+      if (deltaObj.tool_activity) {
+        const state = getStreamState(agentId);
+        if (!state.msg._toolActivities) state.msg._toolActivities = [];
+        const ta = deltaObj.tool_activity;
+        if (ta.status === "running") {
+          state.msg._toolActivities.push(reactive({ ...ta }));
+        } else {
+          const match = [...state.msg._toolActivities].reverse().find(a => a.type === ta.type && a.status === "running");
+          if (match) Object.assign(match, ta);
+          else state.msg._toolActivities.push(reactive({ ...ta }));
+        }
+        state.msg._streaming = true;
+        if (!state.msg._thinkOpen && !state.msg._userToggledThink) state.msg._thinkOpen = true;
+        
         return;
       }
 
@@ -482,6 +685,7 @@ const ThreadDetail = {
           activeStreamStates[agentId].msg._streaming = false;
           delete activeStreamStates[agentId];
         }
+        
         return;
       }
 
@@ -491,13 +695,37 @@ const ThreadDetail = {
       const state = getStreamState(agentId);
       state.msg._streaming = true;
 
-      for (let i = 0; i < delta.length; i++) {
-        const remaining = delta.slice(i);
-        if (!state.inThink && remaining.startsWith("<think>")) { state.inThink = true; if (!state.msg._userToggledThink) state.msg._thinkOpen = true; i += 6; continue; }
-        if (state.inThink && remaining.startsWith("</think>")) { state.inThink = false; state.msg._thinking = state.thinkBuf; if (!state.msg._userToggledThink) state.msg._thinkOpen = false; i += 7; continue; }
-        if (state.inThink) { state.thinkBuf += delta[i]; state.msg._thinking = state.thinkBuf; }
-        else { state.contentBuf += delta[i]; state.msg._displayContent = state.contentBuf; state.msg.content = state.contentBuf; }
+      
+      
+      state.fullBuf = (state.fullBuf || "") + delta;
+      
+      let thinking = "";
+      let content = state.fullBuf;
+      
+      // 1. Extract closed think blocks (non-greedy)
+      content = content.replace(/<think>([\s\S]*?)<\/think>/g, (match, p1) => {
+        thinking += (thinking ? "\n" : "") + p1;
+        return "";
+      });
+      
+      // 2. Handle an open think block at the end (non-greedy)
+      const openMatch = content.match(/<think>([\s\S]*?)$/);
+      if (openMatch) {
+        thinking += (thinking ? "\n" : "") + openMatch[1];
+        content = content.replace(/<think>[\s\S]*?$/, "");
+        if (!state.msg._userToggledThink) state.msg._thinkOpen = true;
+        state.msg._thinkingActive = true;
+      } else {
+        if (!state.msg._userToggledThink && !state.msg._thinkingActive) state.msg._thinkOpen = false;
+        state.msg._thinkingActive = false;
       }
+
+      state.msg.thinking = thinking;
+      state.msg._thinking = thinking; 
+      state.msg.content = content.trim();
+      state.msg._displayContent = content.trim(); 
+    
+      
     }
 
     async function connectStream() {
@@ -528,9 +756,7 @@ const ThreadDetail = {
             if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
             try {
               const data = JSON.parse(line.slice(6));
-              const choiceObj = data.choices?.[0];
-              const deltaObj = choiceObj?.delta || {};
-              processStreamDelta(deltaObj, choiceObj);
+              if (data.choices?.[0]) processStreamDelta(data.choices[0].delta, data.choices[0]);
             } catch {}
           }
         }
@@ -548,7 +774,12 @@ const ThreadDetail = {
       }
     }
 
+    watch(active, (newActive) => {
+      if (newActive && !isStreaming) connectStream();
+    });
+
     onMounted(async () => {
+      fetchTitle();
       await pollAll();
       if (active.value) connectStream();
       poll = setInterval(pollAll, 2000);
@@ -558,7 +789,7 @@ const ThreadDetail = {
       if (currentStreamController) currentStreamController.abort();
     });
 
-    return { threadId, messages, loading, active, activeAgent, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit };
+    return { threadId, threadTitle, messages, loading, active, activeAgent, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage };
   }
 };
 
@@ -607,6 +838,8 @@ app.mount("#app");
   margin: 0;
 }
 .cursor-pointer { cursor: pointer; }
+.tool-link { color: #58a6ff; text-decoration: none; }
+.tool-link:hover { text-decoration: underline; }
 
 /* Markdown rendered content */
 .md-content { font-size: 0.9rem; line-height: 1.7; word-break: break-word; }

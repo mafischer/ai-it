@@ -1,10 +1,6 @@
 /**
  * Post-install patch for @langchain/openai to preserve reasoning_content
  * from OpenAI-compatible APIs (e.g., vllm-mlx with --reasoning-parser).
- *
- * LangChain drops delta.reasoning_content entirely. This patch wraps it
- * in <think> tags so it flows through as content, which Open WebUI renders
- * as collapsible thinking blocks.
  */
 import { readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
@@ -13,44 +9,80 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 
-const ORIGINAL = `const content = delta.content ?? "";`;
-const PATCHED = `let content;
-\tif (reasoning) {
-\t\tconst prefix = _reasoningActive ? "" : "<think>";
-\t\t_reasoningActive = true;
-\t\tcontent = prefix + reasoning + (delta.content ? "</think>" + delta.content : "");
-\t\tif (delta.content) _reasoningActive = false;
-\t} else if (_reasoningActive && delta.content) {
-\t\t_reasoningActive = false;
-\t\tcontent = "</think>" + delta.content;
-\t} else {
-\t\tcontent = delta.content ?? "";
-\t}`;
-
-const ORIGINAL_DECL = `const convertCompletionsDeltaToBaseMessageChunk = ({`;
-const PATCHED_DECL = `let _reasoningActive = false;\nconst convertCompletionsDeltaToBaseMessageChunk = ({`;
-
-const ORIGINAL_REASONING_LINE = `const content = delta.content ?? "";`;
-const PATCHED_REASONING_DECL = `const reasoning = delta.reasoning_content ?? delta.reasoning ?? "";\n\t${PATCHED}`;
-
 for (const ext of ["js", "cjs"]) {
     const file = join(root, `node_modules/@langchain/openai/dist/converters/completions.${ext}`);
     try {
         let src = readFileSync(file, "utf8");
+        let modified = false;
+
+        // 1. Add per-stream state map
+        if (!src.includes('const _reasoningStates = new Map();')) {
+            src = 'const _reasoningStates = new Map();\n' + src;
+            modified = true;
+        }
+
+        // 2. Patch convertCompletionsDeltaToBaseMessageChunk (streaming)
+        // We use a Map to keep track of reasoning state per request ID to avoid parallel leakage.
+        const deltaSearch = /const convertCompletionsDeltaToBaseMessageChunk = \(\{([\s\S]*?)\}\) => \{/m;
+        if (deltaSearch.test(src) && !src.includes('const streamId = rawResponse.id')) {
+            src = src.replace(deltaSearch, (match, args) => {
+                return `const convertCompletionsDeltaToBaseMessageChunk = ({${args}}) => {
+	const streamId = rawResponse.id;
+	let _active = _reasoningStates.get(streamId) || false;
+	const role = delta.role ?? defaultRole;
+	const reasoning = delta.reasoning_content ?? delta.reasoning ?? "";
+	let content = "";
+	if (reasoning) {
+		if (!_active) { content += "<think>"; _active = true; }
+		content += reasoning;
+	}
+	if (delta.content) {
+		if (_active) { content += "</think>"; _active = false; }
+		content += delta.content;
+	}
+	_reasoningStates.set(streamId, _active);
+	if (rawResponse.choices?.[0]?.finish_reason) _reasoningStates.delete(streamId);`
+            });
+            
+            // Remove the old/original content/role lines that we just replaced with our custom logic
+            // We need to be careful with the regex to not over-delete.
+            // In my previous manual write, I had:
+            // const role = delta.role ?? defaultRole;
+            // const reasoning = delta.reasoning_content ?? delta.reasoning ?? "";
+            // const content = (reasoning ? ("<think>" + reasoning + "</think>") : "") + (delta.content ?? "");
+            
+            src = src.replace(/(\t|\s)+const role = delta\.role \?\? defaultRole;\n(\t|\s)+const reasoning = delta\.reasoning_content [\s\S]*?const content = \(reasoning \? [\s\S]*?\)\n/m, "");
+            // Or if it was the original:
+            src = src.replace(/(\t|\s)+const role = delta\.role \?\? defaultRole;\n(\t|\s)+let content;\n(\t|\s)+if \(reasoning\) [\s\S]*?else \{[\s\S]*?content = delta\.content \?\? "";[\s\S]*?\}/m, "");
+            
+            modified = true;
+        }
+
+        // 3. Patch convertCompletionsMessageToBaseMessage (non-streaming / invoke)
+        const msgSearch = /return new (?:_langchain_core_messages\.)?AIMessage\(\{([\s\S]*?)content: (?:require_output\.|handleMultiModalOutput\()(?:content|message\.content \|\| "")/m;
+        if (msgSearch.test(src) && !src.includes('const reasoning = message.reasoning_content')) {
+            src = src.replace(msgSearch, (match, args) => {
+                const isCJS = match.includes('require_output.');
+                const prefix = isCJS ? 'require_output.' : '';
+                return `const reasoning = message.reasoning_content ?? message.reasoning ?? "";
+			const content = (reasoning ? ("<think>" + reasoning + "</think>") : "") + (message.content || "");
+			return new ${match.includes('_langchain_core_messages.') ? '_langchain_core_messages.' : ''}AIMessage({${args}content: ${prefix}handleMultiModalOutput(content`;
+            });
+            modified = true;
+        }
+
+        // 4. Global cleanup of _reasoningActive
         if (src.includes("_reasoningActive")) {
-            console.log(`[patch] ${ext}: already patched`);
-            continue;
+            src = src.replace(/let _reasoningActive = false;\n/g, "");
+            modified = true;
         }
-        if (!src.includes(ORIGINAL)) {
-            console.warn(`[patch] ${ext}: original string not found, skipping`);
-            continue;
+
+        if (modified) {
+            writeFileSync(file, src);
+            console.log(`[patch] ${ext}: patched successfully`);
+        } else {
+            console.log(`[patch] ${ext}: already patched or signature not found`);
         }
-        // Add _reasoningActive state variable before the function
-        src = src.replace(ORIGINAL_DECL, PATCHED_DECL);
-        // Add reasoning extraction and replace content assignment
-        src = src.replace(ORIGINAL_REASONING_LINE, PATCHED_REASONING_DECL);
-        writeFileSync(file, src);
-        console.log(`[patch] ${ext}: patched successfully`);
     } catch (e) {
         console.error(`[patch] ${ext}: ${e.message}`);
     }

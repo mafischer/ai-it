@@ -1,0 +1,10 @@
+{
+  "name": "web-search-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "cheerio": "^1.0.0"
+  }
+}
