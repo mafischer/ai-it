@@ -162,7 +162,7 @@ server.post("/v1/chat/completions", async (request, reply) => {
         };
         const emitChunk = (content, agent) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { content, ...(agent && { agent }) }, finish_reason: null }] });
         const emitToolActivity = (data) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { agent: data.agent, tool_activity: data }, finish_reason: null }] });
-        const onResearchEvent = (data) => { if (data.threadId === threadId) emitToolActivity(data); };
+        const onResearchEvent = (data) => { if (data.threadId === threadId) { console.error(`[SSE TOOL] ${data.agent} ${data.type} ${data.status} ${data.query || data.url || ""}`); emitToolActivity(data); } };
         const onResearchPrompt = (data) => { if (data.threadId === threadId) emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: (typeof model !== "undefined" ? model : "ai-it-org"), choices: [{ index: 0, delta: { content: "", system_prompt: data.prompt, agent: data.agent }, finish_reason: null }] }); };
         const onResearchChunk = (data) => { if (data.threadId === threadId) emitChunk(data.content, data.agent); };
         const onResearchStop = (data) => { 
@@ -193,7 +193,7 @@ server.post("/v1/chat/completions", async (request, reply) => {
         (async () => {
             try {
                 console.error(`[STREAM] Starting workflow for thread ${threadId}`);
-                const eventStream = await app.streamEvents({ messages: [new HumanMessage({ content: lastUserMessage, timestamp: Date.now() })] }, { ...config, version: "v2", signal: abortController.signal });
+                const eventStream = await app.streamEvents({ messages: [new HumanMessage({ content: lastUserMessage, additional_kwargs: { timestamp: Date.now() } })] }, { ...config, version: "v2", signal: abortController.signal });
                 const researchPromptSent = new Set();
                 const agentContentBuffers = {}; // Buffer content per agent for scoring
                 let baClarificationRounds = 0;
@@ -523,12 +523,12 @@ server.get("/api/threads/:threadId/messages", async (request) => {
             const contentRaw = kwargs.content || m.content || "";
             const content = typeof contentRaw === 'string' ? contentRaw : JSON.stringify(contentRaw);
 
-            const add = m.additional_kwargs || {};
+            const add = kwargs.additional_kwargs || m.additional_kwargs || {};
             return {
                 role: isPrompt ? "system" : role,
                 name: cleanName,
                 content: content,
-                timestamp: kwargs.timestamp || add.timestamp || m.timestamp || null,
+                timestamp: add.timestamp || kwargs.timestamp || m.timestamp || null,
                 ...(isPrompt && { type: "prompt" }),
                 _isPromptOriginal: isPrompt
             };
@@ -549,12 +549,16 @@ server.post("/api/threads/:threadId/messages/:messageIndex/score", async (reques
     const { threadId, messageIndex } = request.params;
     const idx = parseInt(messageIndex, 10);
     const { rating, agentName } = request.body || {};
-    if (!rating || rating < 1 || rating > 5) return reply.code(400).send({ error: "Rating must be 1-5" });
+    if (rating === undefined || rating === null || rating < 0 || rating > 5) return reply.code(400).send({ error: "Rating must be 0-5" });
 
     // Persist locally
     const db = getCheckpointDB(true);
     try { db.exec("CREATE TABLE IF NOT EXISTS message_ratings (thread_id TEXT, message_index INTEGER, rating INTEGER, PRIMARY KEY (thread_id, message_index))"); } catch {}
-    db.prepare("INSERT OR REPLACE INTO message_ratings (thread_id, message_index, rating) VALUES (?, ?, ?)").run(threadId, idx, rating);
+    if (rating === 0) {
+        db.prepare("DELETE FROM message_ratings WHERE thread_id = ? AND message_index = ?").run(threadId, idx);
+    } else {
+        db.prepare("INSERT OR REPLACE INTO message_ratings (thread_id, message_index, rating) VALUES (?, ?, ?)").run(threadId, idx, rating);
+    }
     db.close();
 
     // Send to Langfuse — look up latest trace for this session
@@ -843,7 +847,37 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         }
 
         dbw.close();
-        
+
+        // Clean up Langfuse traces created after the rewind point
+        if (process.env.LANGFUSE_SECRET_KEY) {
+            try {
+                const rewindMsg = msgs[messageIndex];
+                const rewindTimestamp = rewindMsg?.kwargs?.timestamp || rewindMsg?.timestamp || rewindMsg?.additional_kwargs?.timestamp;
+                const authHeader = "Basic " + Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
+                const baseUrl = process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST;
+                const traceRes = await fetch(`${baseUrl}/api/public/traces?sessionId=${encodeURIComponent(threadId)}&limit=100`, { headers: { Authorization: authHeader } });
+                const traceData = await traceRes.json();
+                const traces = traceData.data || [];
+                const cutoff = rewindTimestamp ? new Date(rewindTimestamp).getTime() : 0;
+                const toDelete = cutoff
+                    ? traces.filter(t => new Date(t.timestamp).getTime() > cutoff)
+                    : []; // If no timestamp on rewind message, don't delete anything
+                if (toDelete.length > 0) {
+                    console.error(`[LANGFUSE] Rewind: deleting ${toDelete.length} trace(s) after rewind point (keeping ${traces.length - toDelete.length})`);
+                    await Promise.all(toDelete.map(t =>
+                        fetch(`${baseUrl}/api/public/traces/${t.id}`, { method: "DELETE", headers: { Authorization: authHeader } }).catch(() => {})
+                    ));
+                }
+            } catch (e) { console.error("[LANGFUSE] Rewind trace cleanup error:", e.message); }
+        }
+
+        // Also clean up saved ratings for messages beyond the rewind point
+        try {
+            const rdb = getCheckpointDB(true);
+            try { rdb.prepare("DELETE FROM message_ratings WHERE thread_id = ? AND message_index > ?").run(threadId, messageIndex); } catch {}
+            rdb.close();
+        } catch {}
+
         const rewindDirective = getMsgContent(truncatedMsgs[0]) || "Rewind";
         const rewindPreview = rewindDirective.length > 80 ? rewindDirective.slice(0, 80) + "…" : rewindDirective;
         const cfg = { configurable: { thread_id: threadId }, recursionLimit: 100 };
@@ -876,7 +910,7 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         };
         const emitChunk = (text, agent) => emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: text, agent }, finish_reason: null }] });
 
-        const onResearchEvent = (data) => { if (data.threadId === threadId) emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { tool: data, agent: data.agent }, finish_reason: null }] }); };
+        const onResearchEvent = (data) => { if (data.threadId === threadId) { console.error(`[SSE TOOL] ${data.agent} ${data.type} ${data.status} ${data.query || data.url || ""}`); emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { agent: data.agent, tool_activity: data }, finish_reason: null }] }); } };
         const onResearchPrompt = (data) => { if (data.threadId === threadId) { activeAgentSet.add(data.agent); syncActiveAgent(); emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: data.prompt, agent: data.agent }, finish_reason: null }] }); } };
         const onResearchChunk = (data) => { if (data.threadId === threadId) emitChunk(data.content, data.agent); };
         const onResearchStop = (data) => {

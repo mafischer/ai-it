@@ -122,26 +122,8 @@ async function fetchPage(url) {
   return meta.text;
 }
 
-async function fetchPageWithMeta(pageUrl) {
-  const cached = cacheGet(pageUrl, "fetch");
-  if (cached) {
-    console.error(`[CACHE HIT] fetch_page: "${pageUrl}"`);
-    return cached;
-  }
-
-  const resp = await fetch(pageUrl, {
-    headers: BROWSER_HEADERS,
-    redirect: "follow",
-    signal: AbortSignal.timeout(15000),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`Fetch failed ${resp.status}: ${resp.statusText}`);
-  }
-
-  const html = await resp.text();
+function extractContent(html, pageUrl) {
   const $ = cheerio.load(html);
-
   const title = $("title").first().text().trim() || "";
 
   $("script, style, nav, header, footer, iframe, noscript, svg, img, form").remove();
@@ -149,20 +131,99 @@ async function fetchPageWithMeta(pageUrl) {
 
   const text = $("body").text().replace(/\s+/g, " ").trim();
 
-  // Truncate at a generous limit to avoid catastrophic inference crashes but allow plenty of context
-  const maxLen = 20000;
   let domain = "";
   try { domain = new URL(pageUrl).hostname; } catch {}
   const favicon = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32` : "";
 
-  const result = {
-    text: text.length > maxLen ? text.slice(0, maxLen) + "\n\n[...truncated]" : text,
-    title,
-    favicon,
-    domain,
-  };
+  return { text, title, favicon, domain };
+}
 
-  cacheSet(pageUrl, "fetch", result);
+// Shared Playwright browser instance to avoid launching multiple Chromium processes
+let _playwrightBrowser = null;
+let _browserCloseTimer = null;
+
+async function getSharedBrowser() {
+  if (_playwrightBrowser?.isConnected()) return _playwrightBrowser;
+  const { chromium } = await import("playwright");
+  _playwrightBrowser = await chromium.launch({ headless: true });
+  return _playwrightBrowser;
+}
+
+function scheduleBrowserClose() {
+  if (_browserCloseTimer) clearTimeout(_browserCloseTimer);
+  _browserCloseTimer = setTimeout(() => {
+    if (_playwrightBrowser) {
+      _playwrightBrowser.close().catch(() => {});
+      _playwrightBrowser = null;
+    }
+  }, 60000); // Close after 60s idle
+}
+
+async function fetchWithPlaywright(pageUrl) {
+  const browser = await getSharedBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 8000 });
+    await page.waitForTimeout(1500);
+    const html = await page.content();
+    return html;
+  } finally {
+    await page.close().catch(() => {});
+    scheduleBrowserClose();
+  }
+}
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
+  ]);
+}
+
+async function fetchPageWithMeta(pageUrl) {
+  const cached = cacheGet(pageUrl, "fetch");
+  if (cached) {
+    console.error(`[CACHE HIT] fetch_page: "${pageUrl}"`);
+    return cached;
+  }
+
+  // Phase 1: Try plain HTTP fetch
+  let result;
+  try {
+    const resp = await fetch(pageUrl, {
+      headers: BROWSER_HEADERS,
+      redirect: "follow",
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Fetch failed ${resp.status}: ${resp.statusText}`);
+    }
+
+    const html = await resp.text();
+    result = extractContent(html, pageUrl);
+
+    // If the page returned virtually no text, it likely requires JS rendering
+    if (result.text.length < 100) {
+      throw new Error("Page content too short, likely requires JS rendering");
+    }
+  } catch (htmlErr) {
+    // Phase 2: Fall back to Playwright for JS-rendered pages (with 45s total timeout)
+    console.error(`[FETCH] HTML-only failed for "${pageUrl}": ${htmlErr.message} — retrying with Playwright`);
+    try {
+      const html = await withTimeout(fetchWithPlaywright(pageUrl), 10000, "Playwright fetch");
+      result = extractContent(html, pageUrl);
+    } catch (pwErr) {
+      // Don't cache failures
+      throw new Error(`Failed both HTML (${htmlErr.message}) and Playwright (${pwErr.message})`);
+    }
+  }
+
+  // Only cache successful results with meaningful content
+  if (result.text.length >= 100) {
+    cacheSet(pageUrl, "fetch", result);
+  }
+
   return result;
 }
 

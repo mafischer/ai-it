@@ -76,28 +76,22 @@ const webResearchTools = [
 
 async function executeToolCall(call, ctx, nodeConfig) {
     const emit = (data) => { if (ctx) researchEvents.emit("tool", { ...data, threadId: ctx.threadId, agent: ctx.agent }); };
-    
-    // Manual Langfuse span for tool execution
+
+    // Langfuse tracing — create span within the existing trace using the Langfuse client directly
+    const callbacks = nodeConfig?.callbacks;
+    const handlers = Array.isArray(callbacks) ? callbacks : callbacks?.handlers || [];
+    const lfHandler = handlers.find(c => c instanceof CallbackHandler);
     let span = null;
-    if (ctx?.threadId) {
-        // nodeConfig.callbacks is a CallbackManager, not an array — check .handlers
-        const callbacks = nodeConfig?.callbacks;
-        const handlers = Array.isArray(callbacks) ? callbacks : callbacks?.handlers || [];
-        const handler = handlers.find(c => c instanceof CallbackHandler);
-        if (handler?.trace) {
-            span = handler.trace.span({
-                name: `tool_${call.name}`,
-                input: call.args,
-                metadata: { agent: ctx.agent }
-            });
-        } else {
-            span = langfuse.span({
-                name: `tool_${call.name}`,
-                sessionId: ctx.threadId,
-                input: call.args,
-                metadata: { agent: ctx.agent }
-            });
-        }
+
+    if (lfHandler?.traceId) {
+        const lf = lfHandler.langfuse || langfuse;
+        span = lf.span({
+            traceId: lfHandler.traceId,
+            parentObservationId: ctx?.parentRunId,
+            name: `tool_${call.name}`,
+            input: call.args,
+            metadata: { agent: ctx?.agent }
+        });
     }
 
     try {
@@ -161,8 +155,9 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
 
     const llmPhase1 = llm.bindTools(phase1Tools);
     const phase1History = [...messages];
-    
-    phase1History.push({ role: "system", content: `You are in Phase 1 of research. Today's date is ${new Date().toDateString()}. Use the web_search tool to find industry best practices relative to the directive and rounds. Once you find good candidates, you MUST use the submit_links tool to provide up to 5 URLs to be researched. Do not attempt to read the articles yourself.` });
+
+    const currentYear = new Date().getFullYear();
+    phase1History.push({ role: "system", content: `You are in Phase 1 of research. Today's date is ${new Date().toDateString()}. Use the web_search tool to find industry best practices relative to the directive and rounds. When including years in search queries, use ${currentYear} (the current year) — never use older years. Once you find good candidates, you MUST use the submit_links tool to provide up to 5 URLs to be researched. Do not attempt to read the articles yourself.` });
 
     let urlsToFetch = [];
 
@@ -170,12 +165,12 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
         const response = await llmPhase1.invoke(phase1History, nodeConfig);
 
         if (!response.tool_calls?.length) {
-            break; 
+            break;
         }
 
         phase1History.push(response);
         let submitted = false;
-        
+
         for (const call of response.tool_calls) {
             console.error(`[RESEARCH P1] Tool call: ${call.name}(${JSON.stringify(call.args).slice(0, 120)})`);
             if (call.name === "submit_links") {
@@ -189,7 +184,7 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
                 phase1History.push(new ToolMessage({ content: "Unknown tool", tool_call_id: call.id, name: call.name }));
             }
         }
-        
+
         if (submitted) break;
     }
 
@@ -465,7 +460,7 @@ async function researchNode(nodeName, state, nodeConfig) {
     const llm = llms[agentDef?.model || "specialist"];
 
     const researchPrompt = `You are the ${nodeName}. Your task is ONLY to research industry best practices, standards, and existing solutions relevant to the user's directive and any team feedback.
-Today's date is ${new Date().toDateString()}. Use this context when searching for the most recent and relevant information.
+Today's date is ${new Date().toDateString()} (year ${new Date().getFullYear()}). When including years in search queries, always use ${new Date().getFullYear()} — never use older years like 2024 or 2025.
 Use the available tools to search the web and fetch pages.
 DO NOT draft the final response or requirements yet. Gather as much useful information as possible using the tools.
 When you are done researching, or if no research is needed, simply stop calling tools.`;

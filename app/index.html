@@ -38,13 +38,13 @@ function agentName(id) {
   if (id?.endsWith("_research_phase_2")) return `${name} Research Phase 2`;
   if (id?.endsWith("_research")) return `${name} Research Phase 1`;
   const toolEligible = ["business_analyst", "software_architect", "ux_designer"];
-  if (toolEligible.includes(id)) return `${name} Drafting Phase 3`;
+  if (toolEligible.includes(id)) return `${name} Drafting`;
   return name;
 }
 
 function statusColor(status) {
   if (!status) return "grey";
-  if (status.includes("COMPLETE") || status.includes("PASSED") || status.includes("APPROVED") || status.includes("DRAFTED")) return "success";
+  if (status.includes("COMPLETE") || status.includes("PASSED") || status.includes("APPROVED") || status.includes("DRAFTED") || status.includes("CLEAR")) return "success";
   if (status.includes("AMBIGUOUS")) return "warning";
   return "error";
 }
@@ -466,7 +466,7 @@ const ThreadDetail = {
               _thinking: thinking,
               _displayContent: display,
               _thinkOpen: false,
-              _msgOpen: true,
+              _msgOpen: false,
               _streaming: false,
               _rating: m.rating || 0,
               _timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
@@ -551,12 +551,13 @@ const ThreadDetail = {
 
     async function rateMessage(index, stars) {
       const m = messages.value[index];
-      m._rating = stars;
+      const newRating = m._rating === stars ? 0 : stars;
+      m._rating = newRating;
       try {
         await fetch(`/api/threads/${threadId}/messages/${index}/score`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rating: stars, agentName: m.name })
+          body: JSON.stringify({ rating: newRating, agentName: m.name })
         });
       } catch (e) { console.error("Rating failed:", e); }
     }

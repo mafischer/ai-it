@@ -10,6 +10,18 @@ const EMOJIS = {
   support_engineer: "\u{1F6E0}\uFE0F", complete: "\u2705"
 };
 
+function extractStatus(content) {
+  const matches = [...(content || "").matchAll(/STATUS:\s*([A-Z_]+)/g)];
+  return matches.length ? matches[matches.length - 1][1] : "";
+}
+
+function statusColor(status) {
+  if (!status) return "grey";
+  if (status.includes("COMPLETE") || status.includes("PASSED") || status.includes("APPROVED") || status.includes("DRAFTED") || status.includes("CLEAR")) return "success";
+  if (status.includes("AMBIGUOUS")) return "warning";
+  return "error";
+}
+
 function agentDisplayName(id) {
   let name = (id || "").replace(/_research_phase_2_\d+$/, "").replace(/_research_phase_2$/, "").replace(/_research$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
   if (id?.match(/_research_phase_2_(\d+)$/)) {
@@ -19,7 +31,7 @@ function agentDisplayName(id) {
   if (id?.endsWith("_research_phase_2")) return `${name} Research Phase 2`;
   if (id?.endsWith("_research")) return `${name} Research Phase 1`;
   const toolEligible = ["business_analyst", "software_architect", "ux_designer"];
-  if (toolEligible.includes(id)) return `${name} Drafting Phase 3`;
+  if (toolEligible.includes(id)) return `${name} Drafting`;
   return name;
 }
 const ChatView = {
@@ -177,12 +189,8 @@ const ChatView = {
                     </div>
                   </div>
                   <v-card-text class="pa-3">
-                    <div class="d-flex align-center" @click.stop="m._promptOpen = !m._promptOpen">
-                      <v-icon size="small" class="mr-2">{{ m._promptOpen ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
-                      <span class="text-caption text-medium-emphasis">{{ getEmoji(m.name) }} {{ agentDisplayName(m.name) }} Prompt</span>
-                    </div>
-                    <div v-if="m._msgOpen !== false && m._promptOpen" class="md-content mt-2 text-medium-emphasis" style="font-size:0.85rem" v-html="renderMd(m.content)"></div>
-                    <div v-if="m._msgOpen === false" class="md-content mt-1 text-medium-emphasis opacity-70" style="font-size:0.85rem">
+                    <div v-show="m._msgOpen !== false" class="md-content text-medium-emphasis" style="font-size:0.85rem" v-html="renderMd(m.content)"></div>
+                    <div v-show="m._msgOpen === false" class="md-content text-medium-emphasis opacity-70" style="font-size:0.85rem">
                       {{ m.content.slice(0, 100) }}{{ m.content.length > 100 ? '...' : '' }}
                     </div>
                   </v-card-text>
@@ -200,6 +208,9 @@ const ChatView = {
                         {{ getEmoji(m.name) }} {{ agentDisplayName(m.name || 'assistant') }}
                       </v-chip>
                       <v-progress-circular v-if="m._streaming" indeterminate size="12" width="1.5" color="primary"></v-progress-circular>
+                      <v-chip v-if="extractStatus(m.content)" :color="statusColor(extractStatus(m.content))" size="x-small" variant="tonal" class="ml-2">
+                        {{ extractStatus(m.content) }}
+                      </v-chip>
                     </div>
                     <div class="d-flex align-center ga-1">
                       <v-btn icon size="x-small" variant="text" @click.stop="copyToClipboard(m.content)" title="Copy text">
@@ -532,7 +543,7 @@ const ChatView = {
           ...m,
           content: m.content || "",
           thinking: null, // Thinking will be parsed from content if needed
-          _msgOpen: true,
+          _msgOpen: false,
           _timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
         }));
         // Parse existing content for <think> blocks
@@ -566,9 +577,12 @@ const ChatView = {
         if (!target) {
           target = reactive({ role: "assistant", name: agentId, content: "", thinking: null, _streaming: true, _msgOpen: true, _timestamp: new Date() });
           messages.value.push(target);
+        } else {
+          // Expand existing message when reconnecting to active stream
+          target._msgOpen = true;
         }
-        activeStreamStates[agentId] = { 
-          msg: target, 
+        activeStreamStates[agentId] = {
+          msg: target,
           fullBuf: (target.thinking ? ("<think>" + target.thinking + "</think>") : "") + (target.content || "")
         };
       }
@@ -617,7 +631,15 @@ const ChatView = {
         return;
       }
       const delta = deltaObj.content || "";
-      if (!delta) return;
+      if (!delta) {
+        // Empty content with agent ID = "agent started" signal — create message with spinner
+        if (agentId) {
+          const state = getStreamState(agentId);
+          state.msg._streaming = true;
+          state.msg._msgOpen = true;
+        }
+        return;
+      }
       const state = getStreamState(agentId);
       state.msg._streaming = true;
       
@@ -765,7 +787,7 @@ const ChatView = {
     });
     onUnmounted(() => { clearInterval(pollInterval); clearInterval(nowInterval); if (currentStreamController) currentStreamController.abort(); });
 
-    return { drawer, rail, input, workflows, selectedWorkflow, threads, activeThreadIds, currentThreadId, messages, displayMessages, streaming, pausing, messagesContainer, getEmoji, agentDisplayName, formatTime, formatThinkDuration, timeAgo, renderMd, fetchThreads, selectThread, deleteThread, stopThread, exportThread, startNewChat, send, resumeThread, pauseThread, allExpanded, toggleAllMessages, copyToClipboard, cloneAt, toggleMessage };
+    return { drawer, rail, input, workflows, selectedWorkflow, threads, activeThreadIds, currentThreadId, messages, displayMessages, streaming, pausing, messagesContainer, getEmoji, agentDisplayName, extractStatus, statusColor, formatTime, formatThinkDuration, timeAgo, renderMd, fetchThreads, selectThread, deleteThread, stopThread, exportThread, startNewChat, send, resumeThread, pauseThread, allExpanded, toggleAllMessages, copyToClipboard, cloneAt, toggleMessage };
   }
 };
 
