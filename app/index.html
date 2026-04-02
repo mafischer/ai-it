@@ -83,8 +83,15 @@ const ThreadList = {
             <v-card-text class="flex-grow-1">
               <div class="d-flex align-center">
                 <code class="text-caption text-medium-emphasis mr-3">{{ t.thread_id }}</code>
-                <v-progress-circular v-if="isActive(t.thread_id)" indeterminate size="16" width="2" color="primary" class="mr-2" />
-                <v-chip v-if="isActive(t.thread_id)" size="x-small" color="primary" variant="tonal">active</v-chip>
+                <template v-if="isActive(t.thread_id) && activeAgentsFor(t.thread_id).length">
+                  <v-chip v-for="a in activeAgentsFor(t.thread_id)" :key="a" size="x-small" color="primary" variant="tonal" class="mr-1">
+                    <v-progress-circular indeterminate size="10" width="1" color="primary" class="mr-1" />{{ emoji(a) }} {{ agentName(a) }}
+                  </v-chip>
+                </template>
+                <template v-else-if="isActive(t.thread_id)">
+                  <v-progress-circular indeterminate size="16" width="2" color="primary" class="mr-2" />
+                  <v-chip size="x-small" color="primary" variant="tonal">active</v-chip>
+                </template>
               </div>
               <div class="text-body-1 mt-1 font-weight-medium">{{ t.title || t.directive }}</div>
               <div class="d-flex align-center mt-2 ga-2 flex-wrap">
@@ -104,6 +111,7 @@ const ThreadList = {
   setup() {
     const threads = ref([]);
     const activeIds = ref([]);
+    const activeData = ref([]);
     const loading = ref(true);
     let poll;
 
@@ -111,11 +119,14 @@ const ThreadList = {
       try {
         const [tr, ar] = await Promise.all([fetch("/api/threads"), fetch("/api/active")]);
         threads.value = await tr.json();
-        activeIds.value = (await ar.json()).map(i => i.thread_id);
+        const items = await ar.json();
+        activeData.value = items;
+        activeIds.value = items.map(i => i.thread_id);
       } catch {} finally { loading.value = false; }
     }
 
     function isActive(tid) { return activeIds.value.includes(tid); }
+    function activeAgentsFor(tid) { return activeData.value.find(i => i.thread_id === tid)?.agents || []; }
     function emoji(id) { return EMOJIS[id] || "\u{1F916}"; }
 
     async function exportThread(threadId) {
@@ -176,11 +187,9 @@ const ThreadList = {
           const content = m.content || "";
           
           let thinking = null, displayContent = content;
-          const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
-          if (thinkMatch) {
-            thinking = thinkMatch[1].trim();
-            displayContent = content.replace(/<think>[\s\S]*?<\/think>/, '').trim();
-          }
+          const cm = content.match(/^([\s\S]*?)<think>([\s\S]*)<\/think>([\s\S]*)$/);
+          if (cm) { thinking = cm[2].replace(/<\/?think>/g, "").trim() || null; displayContent = (cm[1] + cm[3]).replace(/<\/?think>/g, "").trim(); }
+          else { const om = content.match(/^([\s\S]*?)<think>([\s\S]*)$/); if (om) { thinking = om[2].replace(/<\/?think>/g, "").trim() || null; displayContent = om[1].replace(/<\/?think>/g, "").trim(); } }
 
           let rendered = marked.parse(displayContent, { breaks: true });
           let thinkRendered = thinking ? marked.parse(thinking, { breaks: true }) : '';
@@ -230,7 +239,7 @@ const ThreadList = {
     onMounted(() => { fetchData(); poll = setInterval(fetchData, 3000); });
     onUnmounted(() => clearInterval(poll));
 
-    return { threads, loading, isActive, emoji, agentName, exportThread, deleteThread, deleteAll };
+    return { threads, loading, isActive, activeAgentsFor, emoji, agentName, exportThread, deleteThread, deleteAll };
   }
 };
 
@@ -242,12 +251,18 @@ const ThreadDetail = {
       <div class="pa-4 border-b" style="position: sticky; top: 0; z-index: 100; background-color: #1e1e2e; box-shadow: 0 2px 10px rgba(0,0,0,0.5);">
         <v-btn variant="text" prepend-icon="mdi-arrow-left" @click="$router.push('/admin')" class="mb-3">All Conversations</v-btn>
 
-        <div class="d-flex align-center mb-4">
+        <div class="d-flex align-center mb-2">
           <h1 class="text-h5 font-weight-bold">{{ threadTitle || threadId }}</h1>
           <code class="text-caption text-medium-emphasis ml-2">{{ threadId }}</code>
-          <v-progress-circular v-if="active" indeterminate size="20" width="2" color="primary" class="ml-3" />
+          <template v-if="activeAgents.length">
+            <v-chip v-for="a in activeAgents" :key="a" size="x-small" color="primary" variant="tonal" class="ml-2">
+              <v-progress-circular indeterminate size="12" width="1.5" color="primary" class="mr-1" />{{ emoji(a) }} {{ agentName(a) }}
+            </v-chip>
+          </template>
+          <v-progress-circular v-else-if="active" indeterminate size="20" width="2" color="primary" class="ml-3" />
           <v-spacer />
         </div>
+
 
         <div class="d-flex align-center">
           <v-chip variant="tonal" size="small" prepend-icon="mdi-database" class="mr-3">
@@ -276,7 +291,26 @@ const ThreadDetail = {
       <div class="pa-4" style="background-color: #0f0f0f; min-height: 100vh;">
         <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />
 
-        <div v-for="(m, i) in messages" :key="i" class="mb-3">
+        <div v-for="(section, si) in milestoneSections" :key="'s'+si" class="mb-2">
+          <!-- Section header -->
+          <div class="d-flex align-center cursor-pointer pa-2 rounded mb-2"
+            style="background: rgba(255,255,255,0.04); border-left: 3px solid; min-height: 36px;"
+            :style="{ borderColor: section.active ? '#89b4fa' : 'rgba(255,255,255,0.15)' }"
+            @click="toggleSection(si)">
+            <v-icon size="small" class="mr-2" :color="section.active ? 'primary' : 'medium-emphasis'">
+              {{ isSectionOpen(si) ? 'mdi-chevron-down' : 'mdi-chevron-right' }}
+            </v-icon>
+            <span v-if="section.agent" class="mr-2">{{ emoji(section.agent) }}</span>
+            <span class="text-body-2 font-weight-medium" :class="section.active ? 'text-primary' : 'text-medium-emphasis'">
+              {{ section.label }}
+            </span>
+            <v-chip size="x-small" variant="tonal" class="ml-3">{{ section.messages.length }} msgs</v-chip>
+            <v-progress-circular v-if="section.active" indeterminate size="14" width="2" color="primary" class="ml-2" />
+          </div>
+
+          <!-- Section messages -->
+          <div v-show="isSectionOpen(si)">
+            <div v-for="(m, mi) in section.messages" :key="'m'+si+'-'+mi" class="mb-3">
           <v-card class="w-100 cursor-pointer"
             :border="m.role === 'user' ? 'success sm' : 'info sm'" elevation="3" @click="toggleMessage(m)">
             <div class="d-flex align-center justify-space-between pa-1 border-b opacity-70" style="background: rgba(0,0,0,0.05); z-index: 20;">
@@ -291,9 +325,9 @@ const ThreadDetail = {
               </div>
               <div class="d-flex align-center ga-1">
                 <template v-if="m.role === 'assistant' && m.name">
-                  <v-icon v-for="s in 5" :key="'star-'+i+'-'+s" size="x-small"
+                  <v-icon v-for="s in 5" :key="'star-'+si+'-'+mi+'-'+s" size="x-small"
                     :color="s <= (m._rating || 0) ? 'amber' : 'grey-darken-1'"
-                    @click.stop="rateMessage(i, s)"
+                    @click.stop="rateMessage(msgIndex(m), s)"
                     style="cursor:pointer"
                     :title="s + ' star' + (s > 1 ? 's' : '')">
                     {{ s <= (m._rating || 0) ? 'mdi-star' : 'mdi-star-outline' }}
@@ -303,13 +337,13 @@ const ThreadDetail = {
                 <v-btn icon size="x-small" variant="text" color="primary" @click.stop="copyToClipboard(m.content)" title="Copy text">
                   <v-icon>mdi-content-copy</v-icon>
                 </v-btn>
-                <v-btn icon size="x-small" variant="text" color="primary" @click.stop="openEdit(i)" title="Edit and restart">
+                <v-btn icon size="x-small" variant="text" color="primary" @click.stop="openEdit(msgIndex(m))" title="Edit and restart">
                   <v-icon>mdi-pencil</v-icon>
                 </v-btn>
-                <v-btn icon size="x-small" variant="text" color="primary" @click.stop="rewind(i)" title="Rewind to this point">
+                <v-btn icon size="x-small" variant="text" color="primary" @click.stop="rewind(msgIndex(m))" title="Rewind to this point">
                   <v-icon>mdi-skip-backward</v-icon>
                 </v-btn>
-                <v-btn icon size="x-small" variant="text" color="secondary" @click.stop="cloneAt(i)" title="Clone thread up to here">
+                <v-btn icon size="x-small" variant="text" color="secondary" @click.stop="cloneAt(msgIndex(m))" title="Clone thread up to here">
                   <v-icon>mdi-source-fork</v-icon>
                 </v-btn>
                 <v-icon size="x-small" class="mr-1">
@@ -359,23 +393,14 @@ const ThreadDetail = {
                     </div>
                   </v-card-text>
                 </v-card>
-                <div class="md-content" v-html="renderMd(m._displayContent || m.content)"></div>
+                <div v-if="m._displayContent || m.content" class="md-content" v-html="renderMd(m._displayContent || m.content)"></div>
+                <v-skeleton-loader v-if="m._streaming && !(m._displayContent || m.content)" type="paragraph" />
               </div>
             </v-card-text>
           </v-card>
-        </div>
-
-        <!-- Skeleton for active processing -->
-        <v-card v-if="active" border="info sm" elevation="3" class="mb-3">
-          <v-card-text>
-            <div class="d-flex align-center mb-3">
-              <v-chip color="primary" variant="flat" size="small">
-                {{ activeAgent ? (emoji(activeAgent) + ' ' + agentName(activeAgent)) : 'Processing' }}...
-              </v-chip>
             </div>
-            <v-skeleton-loader type="paragraph" />
-          </v-card-text>
-        </v-card>
+          </div>
+        </div>
       </div>
 
       <!-- Edit Dialog -->
@@ -412,8 +437,9 @@ const ThreadDetail = {
     const messages = ref([]);
     const loading = ref(true);
     const active = ref(false);
-    const activeAgent = ref(null);
+    const activeAgents = ref([]);
     const threadTitle = ref("");
+    const threadChain = ref([]);
     const editDialogOpen = ref(false);
     const editContent = ref("");
     const editIndex = ref(-1);
@@ -422,11 +448,25 @@ const ThreadDetail = {
     function parseThinking(content) {
       if (typeof content !== 'string') content = String(content || "");
       if (!content) return { thinking: null, display: content };
-      const match = content.match(/<think>([\s\S]*?)<\/think>/);
-      if (match) {
-        return { thinking: match[1].trim(), display: content.replace(/<think>[\s\S]*?<\/think>/, "").replace(/<\/?think>/g, "").trim() };
+      // Greedy: first <think> to LAST </think> — handles premature close/reopen
+      const closedMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)<\/think>([\s\S]*)$/);
+      if (closedMatch) {
+        return {
+          thinking: closedMatch[2].replace(/<\/?think>/g, "").trim() || null,
+          display: (closedMatch[1] + closedMatch[3]).replace(/<\/?think>/g, "").trim(),
+          thinkClosed: true
+        };
       }
-      return { thinking: null, display: content };
+      // Open think block (no closing tag — model still streaming thinking)
+      const openMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)$/);
+      if (openMatch) {
+        return {
+          thinking: openMatch[2].replace(/<\/?think>/g, "").trim() || null,
+          display: openMatch[1].replace(/<\/?think>/g, "").trim(),
+          thinkClosed: false
+        };
+      }
+      return { thinking: null, display: content, thinkClosed: true };
     }
 
     let isStreaming = false;
@@ -445,19 +485,24 @@ const ThreadDetail = {
     async function fetchMessages() {
       if (isStreaming) return; // Don't clobber state while streaming
       try {
-        const r = await fetch("/api/threads/" + threadId + "/messages");
+        const r = await fetch("/api/threads/" + threadId + "/messages?chain=true");
         if (r.ok) {
           const msgs = await r.json();
           // Preserve existing reactive state for messages already rendered
           const existing = new Map(messages.value.map((m, i) => [i, m]));
           messages.value = msgs.map((m, i) => {
-            const { thinking, display } = parseThinking(m.content);
+            const { thinking, display, thinkClosed } = parseThinking(m.content);
             const prev = existing.get(i);
             if (prev && prev.role === m.role && prev.name === m.name) {
               prev.content = m.content;
               prev.thinking = thinking;
               prev._thinking = thinking;
               prev._displayContent = display;
+              prev._thinkClosed = thinkClosed;
+              if (!thinkClosed) { prev._thinkingActive = true; prev._thinkOpen = true; }
+              // Clear streaming state when not actively streaming
+              if (!active.value) { prev._streaming = false; prev._thinkingActive = false; }
+              if (!prev._streaming) prev._toolActivities = [];
               return prev;
             }
             return reactive({
@@ -465,9 +510,12 @@ const ThreadDetail = {
               thinking,
               _thinking: thinking,
               _displayContent: display,
-              _thinkOpen: false,
+              _thinkClosed: thinkClosed,
+              _thinkOpen: !thinkClosed,
+              _thinkingActive: !thinkClosed,
               _msgOpen: false,
               _streaming: false,
+              _toolActivities: [],
               _rating: m.rating || 0,
               _timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
             });
@@ -482,7 +530,14 @@ const ThreadDetail = {
         const items = await r.json();
         const entry = items.find(i => i.thread_id === threadId);
         active.value = !!entry;
-        activeAgent.value = entry?.agent || null;
+        activeAgents.value = entry?.agents || [];
+      } catch {}
+    }
+
+    async function fetchChain() {
+      try {
+        const r = await fetch("/api/threads/" + threadId + "/chain");
+        if (r.ok) threadChain.value = await r.json();
       } catch {}
     }
 
@@ -500,9 +555,99 @@ const ThreadDetail = {
       messages.value.forEach(m => m._msgOpen = targetState);
     }
 
+    function formatMilestoneLabel(status) {
+      if (!status) return "";
+      return status.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    }
+
+    function baseAgentName(id) {
+      return (id || "").replace(/_research_phase_2_\d+$/, "").replace(/_research_phase_2$/, "").replace(/_research$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    }
+
+    function deriveSectionLabel(section, nextBoundary) {
+      // If this section produces a milestone, name it after what it accomplished
+      if (nextBoundary) return formatMilestoneLabel(nextBoundary.milestoneStatus);
+      // Last section: name from the agents working in it
+      const agents = [...new Set(section.messages
+        .filter(m => m.role === "assistant" && m.name)
+        .map(m => m.name.replace(/_research.*$/, "")))];
+      if (agents.length) return agents.map(a => baseAgentName(a)).join(", ");
+      // Fallback: if only prompts exist, derive from prompt target agents
+      const promptAgents = [...new Set(section.messages
+        .filter(m => m.type === "prompt" && m.name)
+        .map(m => m.name))];
+      if (promptAgents.length) return promptAgents.map(a => baseAgentName(a)).join(", ");
+      return "Processing";
+    }
+
+    const sectionOverrides = reactive({});
+    let prevSectionCount = 0;
+
+    const milestoneSections = computed(() => {
+      // First pass: split messages by boundaries, collecting boundary data
+      const rawSections = [];
+      const boundaries = [];
+      let current = { messages: [], active: false };
+      rawSections.push(current);
+      for (const m of messages.value) {
+        if (m.type === "boundary") {
+          boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent });
+          current = { messages: [], active: false };
+          rawSections.push(current);
+        } else {
+          current.messages.push(m);
+        }
+      }
+      // Second pass: name each section
+      const sections = rawSections.map((s, i) => {
+        const nextBoundary = i < boundaries.length ? boundaries[i] : null;
+        const agent = nextBoundary ? (nextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
+        return { ...s, label: deriveSectionLabel(s, nextBoundary), agent };
+      });
+      // Third pass: add round numbers for duplicate labels
+      const labelCounts = {};
+      sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
+      const labelCounters = {};
+      sections.forEach(s => {
+        if (labelCounts[s.label] > 1) {
+          labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
+          s.label = s.label + " (Round " + labelCounters[s.label] + ")";
+        }
+      });
+      // Mark last section as active if thread is active
+      if (sections.length && active.value) {
+        sections[sections.length - 1].active = true;
+      }
+      sections.forEach(s => {
+        if (s.messages.some(m => m._streaming)) s.active = true;
+      });
+      if (sections.length !== prevSectionCount) {
+        Object.keys(sectionOverrides).forEach(k => delete sectionOverrides[k]);
+        prevSectionCount = sections.length;
+      }
+      return sections;
+    });
+
+    function isSectionOpen(si) {
+      if (si in sectionOverrides) return sectionOverrides[si];
+      const sections = milestoneSections.value;
+      // Default: last section open, others collapsed (unless only 1 section)
+      if (sections.length <= 1) return true;
+      const section = sections[si];
+      return section.active || si === sections.length - 1;
+    }
+
+    function toggleSection(si) {
+      sectionOverrides[si] = !isSectionOpen(si);
+    }
+
     function toggleMessage(m) {
       if (window.getSelection().toString()) return;
       m._msgOpen = m._msgOpen === false ? true : false;
+    }
+
+    function msgIndex(m) {
+      return messages.value.indexOf(m);
     }
 
     function openEdit(i) {
@@ -511,29 +656,43 @@ const ThreadDetail = {
       editDialogOpen.value = true;
     }
 
+    function resolveMsg(i) {
+      const m = messages.value[i];
+      // _threadMsgIndex: set by chain mode (original index in source thread)
+      // _origIndex: set by parseCheckpointMessages (original index before synthetic boundary injection)
+      const idx = m?._threadMsgIndex ?? m?._origIndex ?? i;
+      return { threadId: m?._threadId || threadId, msgIndex: idx };
+    }
+
     async function saveEdit() {
       if (editIndex.value === -1) return;
-      const r = await fetch("/api/threads/" + threadId + "/rewind", {
+      const { threadId: tid, msgIndex: idx } = resolveMsg(editIndex.value);
+      const r = await fetch("/api/threads/" + tid + "/rewind", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messageIndex: editIndex.value, newContent: editContent.value })
+        body: JSON.stringify({ messageIndex: idx, newContent: editContent.value })
       });
       const d = await r.json();
       if (d.error) alert(d.error);
       editDialogOpen.value = false;
-      pollAll();
+      // Navigate to the target thread if different from current view
+      if (tid !== threadId) router.push("/admin/thread/" + tid);
+      else pollAll();
     }
 
     async function rewind(i) {
-      if (!confirm("Rewind to message " + i + " and re-run?")) return;
+      const { threadId: tid, msgIndex: idx } = resolveMsg(i);
+      if (!confirm("Rewind to message " + idx + " in thread " + tid.slice(0, 8) + " and re-run?")) return;
       try {
-        const r = await fetch("/api/threads/" + threadId + "/rewind", {
+        const r = await fetch("/api/threads/" + tid + "/rewind", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messageIndex: i })
+          body: JSON.stringify({ messageIndex: idx })
         });
         const d = await r.json();
         if (d.error) alert(d.error);
         else console.log("Rewind success:", d.message);
-        pollAll();
+        // Navigate to the target thread if different from current view
+        if (tid !== threadId) router.push("/admin/thread/" + tid);
+        else pollAll();
       } catch (e) {
         alert("Rewind failed: " + e.message);
       }
@@ -551,10 +710,11 @@ const ThreadDetail = {
 
     async function rateMessage(index, stars) {
       const m = messages.value[index];
+      const { threadId: tid, msgIndex: idx } = resolveMsg(index);
       const newRating = m._rating === stars ? 0 : stars;
       m._rating = newRating;
       try {
-        await fetch(`/api/threads/${threadId}/messages/${index}/score`, {
+        await fetch(`/api/threads/${tid}/messages/${idx}/score`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ rating: newRating, agentName: m.name })
@@ -563,11 +723,12 @@ const ThreadDetail = {
     }
 
     async function cloneAt(i) {
-      if (!confirm("Clone thread up to message " + i + " into a new thread?")) return;
+      const { threadId: tid, msgIndex: idx } = resolveMsg(i);
+      if (!confirm("Clone thread up to message " + idx + " into a new thread?")) return;
       try {
-        const r = await fetch("/api/threads/" + threadId + "/clone", {
+        const r = await fetch("/api/threads/" + tid + "/clone", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messageIndex: i })
+          body: JSON.stringify({ messageIndex: idx })
         });
         const d = await r.json();
         if (d.error) { alert(d.error); return; }
@@ -635,7 +796,10 @@ const ThreadDetail = {
         }
         activeStreamStates[agentId] = {
           msg: streamMsg,
-          fullBuf: (streamMsg._thinking ? ("<think>" + streamMsg._thinking + "</think>") : "") + (streamMsg._displayContent || "")
+          // Keep think block open if it was still open (model still streaming thinking)
+          fullBuf: streamMsg._thinking
+            ? ("<think>" + streamMsg._thinking + (streamMsg._thinkClosed !== false ? "</think>" : "")) + (streamMsg._displayContent || "")
+            : (streamMsg._displayContent || "")
         };
       }
       return activeStreamStates[agentId];
@@ -646,7 +810,13 @@ const ThreadDetail = {
       
       if (deltaObj.system_prompt) {
         if (activeStreamStates[agentId]) {
-          activeStreamStates[agentId].msg._streaming = false;
+          const oldMsg = activeStreamStates[agentId].msg;
+          oldMsg._streaming = false;
+          // Remove the empty placeholder bubble created by "agent started" signal
+          if (!oldMsg.content && !oldMsg._thinking && !oldMsg._displayContent) {
+            const idx = messages.value.indexOf(oldMsg);
+            if (idx !== -1) messages.value.splice(idx, 1);
+          }
           delete activeStreamStates[agentId];
         }
 
@@ -702,23 +872,23 @@ const ThreadDetail = {
       
       let thinking = "";
       let content = state.fullBuf;
-      
-      // 1. Extract closed think blocks (non-greedy)
-      content = content.replace(/<think>([\s\S]*?)<\/think>/g, (match, p1) => {
-        thinking += (thinking ? "\n" : "") + p1;
-        return "";
-      });
-      
-      // 2. Handle an open think block at the end (non-greedy)
-      const openMatch = content.match(/<think>([\s\S]*?)$/);
-      if (openMatch) {
-        thinking += (thinking ? "\n" : "") + openMatch[1];
-        content = content.replace(/<think>[\s\S]*?$/, "");
-        if (!state.msg._userToggledThink) state.msg._thinkOpen = true;
-        state.msg._thinkingActive = true;
-      } else {
+
+      // 1. Extract closed think region (greedy: first <think> to LAST </think>)
+      const closedMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)<\/think>([\s\S]*)$/);
+      if (closedMatch) {
+        thinking = closedMatch[2].replace(/<\/?think>/g, "");
+        content = (closedMatch[1] + closedMatch[3]).trim();
         if (!state.msg._userToggledThink && !state.msg._thinkingActive) state.msg._thinkOpen = false;
         state.msg._thinkingActive = false;
+      } else {
+        // 2. Handle an open think block (no closing tag yet — still streaming)
+        const openMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)$/);
+        if (openMatch) {
+          thinking = openMatch[2].replace(/<\/?think>/g, "");
+          content = openMatch[1].trim();
+          if (!state.msg._userToggledThink) state.msg._thinkOpen = true;
+          state.msg._thinkingActive = true;
+        }
       }
 
       state.msg.thinking = thinking;
@@ -764,14 +934,12 @@ const ThreadDetail = {
       } catch (e) {
         if (e.name !== "AbortError") console.error("Connect error:", e);
       } finally {
-        if (!signal.aborted) {
-          isStreaming = false;
-          currentStreamController = null;
-          // Finalize any streaming messages
-          messages.value.forEach(m => { if (m._streaming) m._streaming = false; });
-          for (const key in activeStreamStates) delete activeStreamStates[key];
-          fetchMessages(); // Load final state from DB
-        }
+        isStreaming = false;
+        currentStreamController = null;
+        // Finalize any streaming messages
+        messages.value.forEach(m => { if (m._streaming) m._streaming = false; m._thinkingActive = false; });
+        for (const key in activeStreamStates) delete activeStreamStates[key];
+        if (!signal.aborted) fetchMessages(); // Load final state from DB
       }
     }
 
@@ -781,6 +949,7 @@ const ThreadDetail = {
 
     onMounted(async () => {
       fetchTitle();
+      fetchChain();
       await pollAll();
       if (active.value) connectStream();
       poll = setInterval(pollAll, 2000);
@@ -790,7 +959,7 @@ const ThreadDetail = {
       if (currentStreamController) currentStreamController.abort();
     });
 
-    return { threadId, threadTitle, messages, loading, active, activeAgent, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage };
+    return { threadId, threadTitle, threadChain, messages, loading, active, activeAgents, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage, milestoneSections, isSectionOpen, toggleSection, msgIndex };
   }
 };
 

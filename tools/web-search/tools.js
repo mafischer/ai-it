@@ -126,10 +126,22 @@ function extractContent(html, pageUrl) {
   const $ = cheerio.load(html);
   const title = $("title").first().text().trim() || "";
 
+  // Remove non-content elements
   $("script, style, nav, header, footer, iframe, noscript, svg, img, form").remove();
-  $("[role='navigation'], [role='banner'], [role='complementary']").remove();
+  $("[role='navigation'], [role='banner'], [role='complementary'], [role='contentinfo']").remove();
+  // Remove code blocks — these waste context and aren't useful for best-practice extraction
+  $("pre, code, .highlight, .code-sample, .codehilite, .prism-code").remove();
+  // Remove sidebars, comments, navigation aids, related content
+  $("aside, .sidebar, .related, .related-articles, .recommended").remove();
+  $(".comments, #comments, .comment-section, .disqus").remove();
+  $(".breadcrumb, .pagination, .toc, .table-of-contents, .page-nav").remove();
 
-  const text = $("body").text().replace(/\s+/g, " ").trim();
+  // Target article body first, fall back to <main>, then <body>
+  let container = $("article").first();
+  if (!container.length || container.text().trim().length < 200) container = $("main").first();
+  if (!container.length || container.text().trim().length < 200) container = $("body");
+
+  const text = container.text().replace(/\s+/g, " ").trim();
 
   let domain = "";
   try { domain = new URL(pageUrl).hostname; } catch {}

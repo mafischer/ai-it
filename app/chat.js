@@ -127,7 +127,25 @@ const ChatView = {
 
         <!-- Messages -->
         <div v-else class="flex-grow-1 pa-4" ref="messagesContainer" style="max-width:900px;margin:0 auto;width:100%;overflow-y:scroll">
-          <div v-for="(m, i) in displayMessages" :key="i" class="mb-4">
+          <div v-for="(section, si) in (hasMilestones ? milestoneSections : [{messages: displayMessages, active: streaming}])" :key="'s'+si" :class="hasMilestones ? 'mb-3' : ''">
+            <!-- Milestone section header -->
+            <div v-if="hasMilestones" class="d-flex align-center cursor-pointer pa-2 rounded mb-3"
+              style="background: rgba(255,255,255,0.04); border-left: 3px solid; min-height: 32px;"
+              :style="{ borderColor: section.active ? '#89b4fa' : 'rgba(255,255,255,0.15)' }"
+              @click="toggleSection(si)">
+              <v-icon size="small" class="mr-2" :color="section.active ? 'primary' : 'medium-emphasis'">
+                {{ isSectionOpen(si) ? 'mdi-chevron-down' : 'mdi-chevron-right' }}
+              </v-icon>
+              <span v-if="section.agent" class="mr-2">{{ getEmoji(section.agent) }}</span>
+              <span class="text-body-2 font-weight-medium" :class="section.active ? 'text-primary' : 'text-medium-emphasis'">
+                {{ section.label || 'Start' }}
+              </span>
+              <v-chip size="x-small" variant="tonal" class="ml-3">{{ section.messages.length }}</v-chip>
+              <v-progress-circular v-if="section.active" indeterminate size="14" width="2" color="primary" class="ml-2" />
+            </div>
+
+            <div v-show="!hasMilestones || isSectionOpen(si)">
+          <div v-for="(m, mi) in section.messages" :key="'m'+si+'-'+mi" class="mb-4">
             <div :class="m.role === 'user' ? 'text-right' : 'text-left'" class="mb-1">
               <span class="text-caption text-medium-emphasis">{{ formatTime(m._timestamp) }}</span>
             </div>
@@ -147,7 +165,7 @@ const ChatView = {
                     <v-btn icon size="x-small" variant="text" @click.stop="copyToClipboard(m.content)" title="Copy text">
                       <v-icon size="x-small">mdi-content-copy</v-icon>
                     </v-btn>
-                    <v-btn icon size="x-small" variant="text" @click.stop="cloneAt(i)" title="Clone from here">
+                    <v-btn icon size="x-small" variant="text" @click.stop="cloneAt(chatMsgIndex(m))" title="Clone from here">
                       <v-icon size="x-small">mdi-source-fork</v-icon>
                     </v-btn>
                     <v-icon size="x-small" class="mr-1">
@@ -180,7 +198,7 @@ const ChatView = {
                       <v-btn icon size="x-small" variant="text" @click.stop="copyToClipboard(m.content)" title="Copy text">
                         <v-icon size="x-small">mdi-content-copy</v-icon>
                       </v-btn>
-                      <v-btn icon size="x-small" variant="text" @click.stop="cloneAt(i)" title="Clone from here">
+                      <v-btn icon size="x-small" variant="text" @click.stop="cloneAt(chatMsgIndex(m))" title="Clone from here">
                         <v-icon size="x-small">mdi-source-fork</v-icon>
                       </v-btn>
                       <v-icon size="x-small" class="mr-1">
@@ -216,7 +234,7 @@ const ChatView = {
                       <v-btn icon size="x-small" variant="text" @click.stop="copyToClipboard(m.content)" title="Copy text">
                         <v-icon size="x-small">mdi-content-copy</v-icon>
                       </v-btn>
-                      <v-btn icon size="x-small" variant="text" @click.stop="cloneAt(i)" title="Clone from here">
+                      <v-btn icon size="x-small" variant="text" @click.stop="cloneAt(chatMsgIndex(m))" title="Clone from here">
                         <v-icon size="x-small">mdi-source-fork</v-icon>
                       </v-btn>
                       <v-icon size="x-small" class="mr-1">
@@ -295,6 +313,8 @@ const ChatView = {
               </div>
             </div>
           </div>
+            </div>
+          </div>
         </div>
 
         <!-- Bottom input area -->
@@ -367,8 +387,93 @@ const ChatView = {
       input.value = drafts[key] || "";
     }
 
-    const displayMessages = computed(() => messages.value);
-    const allExpanded = computed(() => messages.value.length > 0 && messages.value.every(m => m._msgOpen !== false));
+    const displayMessages = computed(() => messages.value.filter(m => m.type !== "boundary"));
+    const allExpanded = computed(() => messages.value.length > 0 && messages.value.filter(m => m.type !== "boundary").every(m => m._msgOpen !== false));
+
+    function formatMilestoneLabel(status) {
+      if (!status) return "";
+      return status.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    }
+
+    function baseAgentName(id) {
+      return (id || "").replace(/_research_phase_2_\d+$/, "").replace(/_research_phase_2$/, "").replace(/_research$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    }
+
+    function deriveSectionLabel(section, nextBoundary) {
+      if (nextBoundary) return formatMilestoneLabel(nextBoundary.milestoneStatus);
+      const agents = [...new Set(section.messages
+        .filter(m => m.role === "assistant" && m.name)
+        .map(m => m.name.replace(/_research.*$/, "")))];
+      if (agents.length) return agents.map(a => baseAgentName(a)).join(", ");
+      const promptAgents = [...new Set(section.messages
+        .filter(m => m.type === "prompt" && m.name)
+        .map(m => m.name))];
+      if (promptAgents.length) return promptAgents.map(a => baseAgentName(a)).join(", ");
+      return "Processing";
+    }
+
+    const chatSectionOverrides = reactive({});
+    let chatPrevSectionCount = 0;
+
+    const milestoneSections = computed(() => {
+      const rawSections = [];
+      const boundaries = [];
+      let current = { messages: [], active: false };
+      rawSections.push(current);
+      for (const m of messages.value) {
+        if (m.type === "boundary") {
+          boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent });
+          current = { messages: [], active: false };
+          rawSections.push(current);
+        } else {
+          current.messages.push(m);
+        }
+      }
+      const sections = rawSections.map((s, i) => {
+        const nextBoundary = i < boundaries.length ? boundaries[i] : null;
+        const agent = nextBoundary ? (nextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
+        return { ...s, label: deriveSectionLabel(s, nextBoundary), agent };
+      });
+      // Add round numbers for duplicate labels
+      const labelCounts = {};
+      sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
+      const labelCounters = {};
+      sections.forEach(s => {
+        if (labelCounts[s.label] > 1) {
+          labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
+          s.label = s.label + " (Round " + labelCounters[s.label] + ")";
+        }
+      });
+      if (sections.length && streaming.value) {
+        sections[sections.length - 1].active = true;
+      }
+      sections.forEach(s => {
+        if (s.messages.some(m => m._streaming)) s.active = true;
+      });
+      if (sections.length !== chatPrevSectionCount) {
+        Object.keys(chatSectionOverrides).forEach(k => delete chatSectionOverrides[k]);
+        chatPrevSectionCount = sections.length;
+      }
+      return sections;
+    });
+
+    const hasMilestones = computed(() => milestoneSections.value.length > 1);
+
+    function isSectionOpen(si) {
+      if (si in chatSectionOverrides) return chatSectionOverrides[si];
+      const sections = milestoneSections.value;
+      if (sections.length <= 1) return true;
+      const section = sections[si];
+      return section.active || si === sections.length - 1;
+    }
+
+    function toggleSection(si) {
+      chatSectionOverrides[si] = !isSectionOpen(si);
+    }
+
+    function chatMsgIndex(m) {
+      return messages.value.indexOf(m);
+    }
 
     function toggleMessage(m) {
       if (window.getSelection().toString()) return;
@@ -537,21 +642,32 @@ const ChatView = {
       restoreDraft();
       router.replace({ query: { t: threadId } });
       try {
-        const r = await fetch("/api/threads/" + threadId + "/messages");
+        const r = await fetch("/api/threads/" + threadId + "/messages?chain=true");
         const msgs = await r.json();
         messages.value = msgs.map(m => reactive({
           ...m,
           content: m.content || "",
-          thinking: null, // Thinking will be parsed from content if needed
-          _msgOpen: false,
+          thinking: null,
+          _msgOpen: m.type === "boundary" ? false : false,
           _timestamp: m.timestamp ? new Date(m.timestamp) : new Date()
         }));
-        // Parse existing content for <think> blocks
+        // Parse existing content for <think> blocks (greedy: first <think> to last </think>)
         messages.value.forEach(m => {
-          const match = (m.content || "").match(/<think>([\s\S]*?)<\/think>/);
-          if (match) {
-            m.thinking = match[1].trim();
-            m.content = m.content.replace(/<think>[\s\S]*?<\/think>/, "").trim();
+          const content = m.content || "";
+          const closedMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)<\/think>([\s\S]*)$/);
+          if (closedMatch) {
+            m.thinking = closedMatch[2].replace(/<\/?think>/g, "").trim();
+            m.content = (closedMatch[1] + closedMatch[3]).replace(/<\/?think>/g, "").trim();
+            m._thinkClosed = true;
+          } else {
+            const openMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)$/);
+            if (openMatch) {
+              m.thinking = openMatch[2].replace(/<\/?think>/g, "").trim();
+              m.content = openMatch[1].replace(/<\/?think>/g, "").trim();
+              m._thinkClosed = false; // Think block still open — model still streaming thinking
+              m._thinkingActive = true;
+              m._thinkOpen = true;
+            }
           }
         });
       } catch {}
@@ -583,7 +699,10 @@ const ChatView = {
         }
         activeStreamStates[agentId] = {
           msg: target,
-          fullBuf: (target.thinking ? ("<think>" + target.thinking + "</think>") : "") + (target.content || "")
+          // Reconstruct buffer: keep think block open if it was still open (model still streaming thinking)
+          fullBuf: target.thinking
+            ? ("<think>" + target.thinking + (target._thinkClosed !== false ? "</think>" : "")) + (target.content || "")
+            : (target.content || "")
         };
       }
       return activeStreamStates[agentId];
@@ -591,9 +710,30 @@ const ChatView = {
 
     function processStreamDelta(deltaObj, choiceObj) {
       const agentId = deltaObj.agent || "";
+      // Thread transition: update internal tracking, keep streaming seamlessly
+      if (deltaObj.thread_transition) {
+        const tt = deltaObj.thread_transition;
+        console.log(`[THREAD] Transition: ${tt.from} → ${tt.to} (${tt.milestone} by ${tt.agent})`);
+        if (!window._threadChain) window._threadChain = [currentThreadId.value];
+        window._threadChain.push(tt.to);
+        // Insert a boundary marker for milestone sections
+        messages.value.push(reactive({
+          role: "system", name: "__boundary__", type: "boundary",
+          content: `── Thread transition: ${tt.milestone || "milestone"} ──`,
+          milestoneStatus: tt.milestone || "", milestoneAgent: tt.agent || "",
+          _msgOpen: false, _timestamp: new Date()
+        }));
+        return;
+      }
       if (deltaObj.system_prompt) {
         if (activeStreamStates[agentId]) {
-          activeStreamStates[agentId].msg._streaming = false;
+          const oldMsg = activeStreamStates[agentId].msg;
+          oldMsg._streaming = false;
+          // Remove the empty placeholder bubble created by "agent started" signal
+          if (!oldMsg.content && !oldMsg.thinking) {
+            const idx = messages.value.indexOf(oldMsg);
+            if (idx !== -1) messages.value.splice(idx, 1);
+          }
           delete activeStreamStates[agentId];
         }
         
@@ -648,23 +788,25 @@ const ChatView = {
       
       let thinking = "";
       let content = state.fullBuf;
-      
-      // 1. Extract closed think blocks (non-greedy)
-      content = content.replace(/<think>([\s\S]*?)<\/think>/g, (match, p1) => {
-        thinking += (thinking ? "\n" : "") + p1;
-        return "";
-      });
-      
-      // 2. Handle an open think block at the end (non-greedy)
-      const openMatch = content.match(/<think>([\s\S]*?)$/);
-      if (openMatch) {
-        thinking += (thinking ? "\n" : "") + openMatch[1];
-        content = content.replace(/<think>[\s\S]*?$/, "");
-        if (!state.msg._userToggledThink) state.msg._thinkOpen = true;
-        state.msg._thinkingActive = true;
-      } else {
+
+      // 1. Extract closed think region (greedy: first <think> to LAST </think>)
+      //    Models produce one contiguous thinking region; greedy prevents
+      //    premature close if the model outputs </think>...<think> mid-thought.
+      const closedMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)<\/think>([\s\S]*)$/);
+      if (closedMatch) {
+        thinking = closedMatch[2].replace(/<\/?think>/g, "");
+        content = (closedMatch[1] + closedMatch[3]).trim();
         if (!state.msg._userToggledThink && !state.msg._thinkingActive) state.msg._thinkOpen = false;
         state.msg._thinkingActive = false;
+      } else {
+        // 2. Handle an open think block (no closing tag yet — still streaming)
+        const openMatch = content.match(/^([\s\S]*?)<think>([\s\S]*)$/);
+        if (openMatch) {
+          thinking = openMatch[2].replace(/<\/?think>/g, "");
+          content = openMatch[1].trim();
+          if (!state.msg._userToggledThink) state.msg._thinkOpen = true;
+          state.msg._thinkingActive = true;
+        }
       }
 
       state.msg.thinking = thinking;
@@ -703,7 +845,10 @@ const ChatView = {
             } catch {}
           }
         }
-      } catch {} finally { streaming.value = false; currentStreamController = null; fetchThreads(); }
+      } catch {} finally {
+        for (const key in activeStreamStates) { activeStreamStates[key].msg._streaming = false; delete activeStreamStates[key]; }
+        streaming.value = false; currentStreamController = null; fetchThreads();
+      }
     }
 
     const pausing = ref(false);
@@ -759,7 +904,10 @@ const ChatView = {
             } catch {}
           }
         }
-      } catch {} finally { streaming.value = false; currentStreamController = null; }
+      } catch {} finally {
+        for (const key in activeStreamStates) { activeStreamStates[key].msg._streaming = false; delete activeStreamStates[key]; }
+        streaming.value = false; currentStreamController = null;
+      }
     }
 
     onMounted(async () => {
@@ -787,7 +935,7 @@ const ChatView = {
     });
     onUnmounted(() => { clearInterval(pollInterval); clearInterval(nowInterval); if (currentStreamController) currentStreamController.abort(); });
 
-    return { drawer, rail, input, workflows, selectedWorkflow, threads, activeThreadIds, currentThreadId, messages, displayMessages, streaming, pausing, messagesContainer, getEmoji, agentDisplayName, extractStatus, statusColor, formatTime, formatThinkDuration, timeAgo, renderMd, fetchThreads, selectThread, deleteThread, stopThread, exportThread, startNewChat, send, resumeThread, pauseThread, allExpanded, toggleAllMessages, copyToClipboard, cloneAt, toggleMessage };
+    return { drawer, rail, input, workflows, selectedWorkflow, threads, activeThreadIds, currentThreadId, messages, displayMessages, streaming, pausing, messagesContainer, getEmoji, agentDisplayName, extractStatus, statusColor, formatTime, formatThinkDuration, timeAgo, renderMd, fetchThreads, selectThread, deleteThread, stopThread, exportThread, startNewChat, send, resumeThread, pauseThread, allExpanded, toggleAllMessages, copyToClipboard, cloneAt, toggleMessage, milestoneSections, hasMilestones, isSectionOpen, toggleSection, chatMsgIndex };
   }
 };
 

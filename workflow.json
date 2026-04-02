@@ -1,122 +1,218 @@
 {
   "version": "1.0",
-
   "engines": {
     "lm-studio": {
-      "url": ["http://localhost:1234/v1"],
-      "capabilities": ["text", "reasoning"]
+      "url": [
+        "http://localhost:1234/v1"
+      ],
+      "capabilities": [
+        "text",
+        "reasoning"
+      ]
     },
     "llama-server": {
-      "url": ["http://10.3.0.241:8080/v1"],
+      "url": [
+        "http://10.3.0.241:8080/v1"
+      ],
       "apiKey": "${LFM2_8B_KEY}",
       "discover": true
     },
     "olmx": {
-      "url": ["http://localhost:8001/v1"],
-      "capabilities": ["text", "reasoning"]
+      "url": [
+        "http://localhost:8001/v1",
+        "http://10.1.0.3:8001/v1"
+      ],
+      "capabilities": [
+        "text",
+        "reasoning"
+      ]
     }
   },
-
   "models": {
-    "specialist": { "engine": "olmx", "modelId": "Qwen3.5-27B-5bit" },
-    "router":     { "engine": "llama-server", "modelId": "lfm2-8b" }
+    "specialist": {
+      "engine": "olmx",
+      "modelId": "Qwopus3.5-27B-v2-MLX-mixed-4-6-bit"
+    },
+    "router": {
+      "engine": "llama-server",
+      "modelId": "lfm2-8b"
+    }
   },
-
   "pipeline": {
     "entry": "business_analyst",
-    "question_statuses": ["DIRECTIVE_AMBIGUOUS", "REQUIREMENTS_AMBIGUOUS", "QUESTION"],
+    "question_statuses": [
+      "DIRECTIVE_AMBIGUOUS",
+      "REQUIREMENTS_AMBIGUOUS",
+      "QUESTION"
+    ],
     "maxClarificationRounds": 5
   },
-
   "agents": {
     "business_analyst": {
       "role": "Business Analyst",
       "emoji": "📋",
       "mission": "Extract business requirements and user stories from the USER directive.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
-      "prompts": ["main", "continue", "approval", "query"]
+      "requires": [
+        "text",
+        "reasoning"
+      ],
+      "prompts": [
+        "main",
+        "continue",
+        "approval",
+        "query"
+      ]
     },
     "software_architect": {
       "role": "Software Architect",
       "emoji": "🏗️",
       "mission": "Create technical design based on BA requirements.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
-      "prompts": ["main", "continue", "approval", "query"]
+      "requires": [
+        "text",
+        "reasoning"
+      ],
+      "prompts": [
+        "main",
+        "continue",
+        "approval",
+        "query"
+      ],
+      "maxClarificationRounds": 3
     },
     "ux_designer": {
       "role": "UX Designer",
       "emoji": "🎨",
       "mission": "Design User Interface and Experience based on requirements.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
-      "prompts": ["main", "continue", "approval", "query"]
+      "requires": [
+        "text",
+        "reasoning"
+      ],
+      "prompts": [
+        "main",
+        "continue",
+        "approval",
+        "query"
+      ],
+      "maxClarificationRounds": 3
     },
     "backend_software_engineer": {
       "role": "Backend Software Engineer",
       "emoji": "⚙️",
       "mission": "Implement backend code based on Architect's design.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
-      "prompts": ["main", "continue", "approval", "query"]
+      "requires": [
+        "text",
+        "reasoning"
+      ],
+      "prompts": [
+        "main",
+        "continue",
+        "approval",
+        "query"
+      ]
     },
     "frontend_software_engineer": {
       "role": "Frontend Software Engineer",
       "emoji": "🖥️",
       "mission": "Implement frontend code based on UX Designer's design.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
-      "prompts": ["main", "continue", "approval", "query"]
+      "requires": [
+        "text",
+        "reasoning"
+      ],
+      "prompts": [
+        "main",
+        "continue",
+        "approval",
+        "query"
+      ]
     },
     "quality_engineer": {
       "role": "Quality Engineer",
       "emoji": "🔍",
       "mission": "Test and validate implementations.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
-      "prompts": ["main", "continue", "approval", "query"]
+      "requires": [
+        "text",
+        "reasoning"
+      ],
+      "prompts": [
+        "main",
+        "continue",
+        "approval",
+        "query"
+      ]
     },
     "site_reliability_engineer": {
       "role": "SRE",
       "emoji": "📈",
       "mission": "Review implementation for reliability and scalability.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
+      "requires": [
+        "text",
+        "reasoning"
+      ],
       "active": false,
-      "prompts": ["main", "query"]
+      "prompts": [
+        "main",
+        "query"
+      ]
     },
     "devops_engineer": {
       "role": "DevOps Engineer",
       "emoji": "🚀",
       "mission": "Create CI/CD pipeline and deployment infrastructure.",
       "model": "specialist",
-      "requires": ["text", "reasoning"],
+      "requires": [
+        "text",
+        "reasoning"
+      ],
       "active": false,
-      "prompts": ["main", "query"]
+      "prompts": [
+        "main",
+        "query"
+      ]
     },
     "support_engineer": {
       "role": "Support Engineer",
       "emoji": "🛠️",
       "mission": "Provide support feedback and customer concerns.",
       "model": "specialist",
-      "requires": ["text"],
+      "requires": [
+        "text"
+      ],
       "active": false,
-      "prompts": ["main", "query"]
+      "prompts": [
+        "main",
+        "query"
+      ]
     }
   },
-
   "routing": {
     "business_analyst": {
       "routes": {
-        "REQUIREMENTS_DRAFTED": ["software_architect", "ux_designer"],
-        "REQUIREMENTS_APPROVED": ["backend_software_engineer", "frontend_software_engineer"],
-        "REQUIREMENTS_AMBIGUOUS": ["software_architect", "ux_designer"],
+        "REQUIREMENTS_DRAFTED": [
+          "software_architect",
+          "ux_designer"
+        ],
+        "REQUIREMENTS_APPROVED": [
+          "backend_software_engineer",
+          "frontend_software_engineer"
+        ],
+        "REQUIREMENTS_AMBIGUOUS": [
+          "software_architect",
+          "ux_designer"
+        ],
         "DIRECTIVE_CLEAR": "$self",
         "DIRECTIVE_AMBIGUOUS": "__end__",
         "QUESTION": "__end__"
       },
-      "approval_triggers": ["DESIGN_COMPLETE"],
+      "approval_triggers": [
+        "DESIGN_COMPLETE"
+      ],
       "fallback": "router"
     },
     "software_architect": {
@@ -128,7 +224,9 @@
         "REQUIREMENTS_CLEAR": "$self",
         "REQUIREMENTS_AMBIGUOUS": "business_analyst"
       },
-      "approval_triggers": ["IMPLEMENTATION_COMPLETE"],
+      "approval_triggers": [
+        "IMPLEMENTATION_COMPLETE"
+      ],
       "fallback": "router"
     },
     "ux_designer": {
@@ -140,7 +238,9 @@
         "REQUIREMENTS_CLEAR": "$self",
         "REQUIREMENTS_AMBIGUOUS": "business_analyst"
       },
-      "approval_triggers": ["IMPLEMENTATION_COMPLETE"],
+      "approval_triggers": [
+        "IMPLEMENTATION_COMPLETE"
+      ],
       "fallback": "router"
     },
     "backend_software_engineer": {
@@ -151,7 +251,9 @@
         "IMPLEMENTATION_CLEAR": "$self",
         "IMPLEMENTATION_AMBIGUOUS": "software_architect"
       },
-      "approval_triggers": ["REJECTED"],
+      "approval_triggers": [
+        "REJECTED"
+      ],
       "fallback": "router"
     },
     "frontend_software_engineer": {
@@ -162,22 +264,41 @@
         "IMPLEMENTATION_CLEAR": "$self",
         "IMPLEMENTATION_AMBIGUOUS": "ux_designer"
       },
-      "approval_triggers": ["REJECTED"],
+      "approval_triggers": [
+        "REJECTED"
+      ],
       "fallback": "router"
     },
     "quality_engineer": {
       "routes": {
         "TESTING_COMPLETE": "__end__",
         "TESTS_PASSED": "__end__",
-        "REJECTED": { "$previous_matching": ["backend_software_engineer", "frontend_software_engineer"], "default": "backend_software_engineer" },
-        "QUESTION": { "$previous_matching": ["backend_software_engineer", "frontend_software_engineer"], "default": "backend_software_engineer" },
+        "REJECTED": {
+          "$previous_matching": [
+            "backend_software_engineer",
+            "frontend_software_engineer"
+          ],
+          "default": "backend_software_engineer"
+        },
+        "QUESTION": {
+          "$previous_matching": [
+            "backend_software_engineer",
+            "frontend_software_engineer"
+          ],
+          "default": "backend_software_engineer"
+        },
         "TESTING_CLEAR": "$self",
-        "TESTING_AMBIGUOUS": { "$previous_matching": ["backend_software_engineer", "frontend_software_engineer"], "default": "backend_software_engineer" }
+        "TESTING_AMBIGUOUS": {
+          "$previous_matching": [
+            "backend_software_engineer",
+            "frontend_software_engineer"
+          ],
+          "default": "backend_software_engineer"
+        }
       },
       "fallback": "router"
     }
   },
-
   "router": {
     "model": "router",
     "systemPrompt": "templates/router/system.md"

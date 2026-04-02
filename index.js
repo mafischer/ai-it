@@ -2,7 +2,7 @@ import "dotenv/config";
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import { StateGraph, MessagesAnnotation, Annotation, START, END } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
-import { createLLM } from "./src/utils/llm.js";
+import { createLLM, createAgentLLM } from "./src/utils/llm.js";
 import { readFileSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -11,6 +11,7 @@ import { getConfig, getActiveAgents, getRouting, getPipeline, getRouterConfig, i
 import { renderPrompt } from "./src/config/templates.js";
 import { resolveTarget } from "./src/config/routing.js";
 import { searchDDG, fetchPageWithMeta } from "./tools/web-search/tools.js";
+import { initRagDB, storeArticle, queryChunks } from "./src/utils/rag.js";
 import { EventEmitter } from "events";
 import { Langfuse } from "langfuse";
 import { CallbackHandler } from "langfuse-langchain";
@@ -27,16 +28,27 @@ export const researchEvents = new EventEmitter();
 
 const checkpointer = SqliteSaver.fromConnString("./checkpoints.db");
 const config = getConfig();
+initRagDB().catch(err => console.error("[RAG] Init failed:", err.message));
 
 const GraphState = Annotation.Root({
   ...MessagesAnnotation.spec
 });
 
-// Create LLMs from config (keyed by model key, not model ID)
+// Create shared LLMs (for router and fallback use)
 const llms = {};
 for (const key of Object.keys(config.models)) {
     llms[key] = createLLM(key);
 }
+
+// Create per-agent LLM instances so parallel agents get independent round-robin
+// counters and hit different endpoints concurrently (e.g., SA on host A, UX on host B)
+const agentLLMs = {};
+const activeAgentNames = getActiveAgents();
+activeAgentNames.forEach((name, idx) => {
+    const modelKey = config.agents[name]?.model || "specialist";
+    agentLLMs[name] = createAgentLLM(modelKey, idx);
+    console.log(`[LLM]: Agent "${name}" → dedicated instance (offset ${idx % 2})`);
+});
 
 const routerLLM = llms[config.router.model];
 
@@ -121,7 +133,7 @@ async function executeToolCall(call, ctx, nodeConfig) {
     return "Unknown tool";
 }
 
-const MAX_RESEARCH_ROUNDS = 5;
+const MAX_RESEARCH_ROUNDS = 3;
 
 async function runResearch(llm, messages, ctx, nodeConfig) {
     const phase1Tools = [
@@ -137,11 +149,11 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
             type: "function",
             function: {
                 name: "submit_links",
-                description: "Submit up to 5 relevant article URLs to be deeply researched.",
+                description: "Submit relevant article URLs to be deeply researched. Submit one URL per topic or ambiguity — do not artificially limit the number.",
                 parameters: {
                     type: "object",
                     properties: {
-                        urls: { type: "array", items: { type: "string", description: "URL of the article" }, description: "Array of URLs" }
+                        urls: { type: "array", items: { type: "string", description: "URL of the article" }, description: "Array of URLs — one per topic or ambiguity" }
                     },
                     required: ["urls"]
                 }
@@ -157,7 +169,7 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
     const phase1History = [...messages];
 
     const currentYear = new Date().getFullYear();
-    phase1History.push({ role: "system", content: `You are in Phase 1 of research. Today's date is ${new Date().toDateString()}. Use the web_search tool to find industry best practices relative to the directive and rounds. When including years in search queries, use ${currentYear} (the current year) — never use older years. Once you find good candidates, you MUST use the submit_links tool to provide up to 5 URLs to be researched. Do not attempt to read the articles yourself.` });
+    phase1History.push({ role: "system", content: `You are in Phase 1 of research. Today's date is ${new Date().toDateString()}. Use the web_search tool to find industry best practices relative to the directive and any team feedback. When including years in search queries, use ${currentYear} (the current year) — never use older years. Once you find good candidates, you MUST use the submit_links tool to submit URLs for deep research. Submit one URL per topic or ambiguity — do not artificially limit the number. Do not attempt to read the articles yourself.` });
 
     let urlsToFetch = [];
 
@@ -192,70 +204,104 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
         return ""; // No links submitted
     }
 
-    // Trim to 5 URLs
-    urlsToFetch = urlsToFetch.slice(0, 5);
-    console.error(`[RESEARCH P2] Fetching ${urlsToFetch.length} URLs in parallel...`);
+    console.error(`[RESEARCH P2] Fetching ${urlsToFetch.length} URLs and storing in RAG...`);
 
-    // Phase 2: Parallel Fetch and Summarize
-    const phase2PromptText = `You are an expert researcher. Read the provided article content and extract ONLY the industry best practice details relevant to the user's directive and context. Do not output raw text, only the extracted relevant details. Ensure your extraction is concise and directly applicable.`;
+    // Phase 2: Parallel Fetch → Store in pgvector → RAG Query → Single LLM Extraction
+    // Use root thread ID so all agents in the chain share the same RAG session
+    const sessionId = ctx?.rootThreadId || ctx?.threadId || "unknown";
 
-    const phase2Promises = urlsToFetch.map(async (url, index) => {
+    // 2a. Fetch all URLs in parallel and store in vector DB
+    const fetchPromises = urlsToFetch.map(async (url, index) => {
         const subAgentName = `${phase1AgentName.replace("_research", "")}_research_phase_2_${index + 1}`;
         try {
-            if (ctx && researchEvents) {
-                researchEvents.emit("prompt", { threadId: ctx.threadId, agent: subAgentName, prompt: phase2PromptText + `\n\nTarget URL: ${url}` });
-            }
-
             console.error(`[RESEARCH P2] Fetching ${url}`);
             const fetchCtx = { ...ctx, agent: subAgentName };
             const fetchResult = await executeToolCall({ name: "fetch_page", args: { url } }, fetchCtx, nodeConfig);
-            
-            if (!fetchResult || fetchResult.startsWith("Error:")) {
-                const errStr = `URL: ${url}\nFailed to fetch or read content.`;
-                if (ctx && researchEvents) {
-                    researchEvents.emit("chunk", { threadId: ctx.threadId, agent: subAgentName, content: errStr });
-                    researchEvents.emit("stop", { threadId: ctx.threadId, agent: subAgentName });
-                }
-                return errStr;
+
+            if (!fetchResult || fetchResult.startsWith("Error:") || fetchResult.length < 200) {
+                console.error(`[RESEARCH P2] Skipping ${url}: insufficient content (${fetchResult?.length || 0} chars)`);
+                return { url, stored: 0 };
             }
 
-            const phase2History = [
-                ...messages.filter(m => m.role === "user"),
-                { role: "system", content: phase2PromptText },
-                { role: "user", content: `[SOURCE URL]: ${url}\n\n[ARTICLE CONTENT]:\n${fetchResult.slice(0, 20000)}\n\nExtract the relevant best practices from the article above.` }
-            ];
-
-            const stream = await llm.stream(phase2History, { ...nodeConfig, tags: ["hide_stream"] });
-            let extracted = "";
-            for await (const chunk of stream) {
-                const text = typeof chunk.content === 'string' ? chunk.content : String(chunk.content || "");
-                extracted += text;
-                if (ctx && researchEvents) {
-                    researchEvents.emit("chunk", { threadId: ctx.threadId, agent: subAgentName, content: text });
-                }
-            }
-
+            // Store in vector DB
+            let domain = "";
+            try { domain = new URL(url).hostname; } catch {}
+            const chunks = await storeArticle(sessionId, url, domain, fetchResult);
             if (ctx && researchEvents) {
-                researchEvents.emit("stop", { threadId: ctx.threadId, agent: subAgentName });
+                researchEvents.emit("tool", { type: "fetch", status: "stored", url, domain, threadId: ctx.threadId, agent: ctx.agent, chunks });
             }
-
-            let cleaned = extracted.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "").replace(/<\/?think>/g, "").trim();
-            return `[SOURCE URL]: ${url}\n[RESEARCH-BASED RECOMMENDATIONS]:\n${cleaned}`;
-            
+            return { url, stored: chunks };
         } catch (err) {
-            console.error(`[RESEARCH P2] Error processing ${url}: ${err.message}`);
-            if (ctx && researchEvents) {
-                researchEvents.emit("stop", { threadId: ctx.threadId, agent: subAgentName });
-            }
-            return `URL: ${url}\nError processing content.`;
+            console.error(`[RESEARCH P2] Error fetching ${url}: ${err.message}`);
+            return { url, stored: 0 };
         }
     });
 
-    const phase2Results = await Promise.all(phase2Promises);
-    
-    const combined = phase2Results.join("\n\n---\n\n");
-    return phase2Results.length
-        ? "\n\n[RESEARCH FINDINGS FROM WEB]:\n(Note: The following research represents aggregated industry trends and ideas. Use your professional judgment when considering this information; it is helpful context but not necessarily the ultimate truth on how to implement the solution.)\n\n" + combined
+    const fetchResults = await Promise.all(fetchPromises);
+    const storedCount = fetchResults.reduce((sum, r) => sum + r.stored, 0);
+    console.error(`[RESEARCH P2] Stored ${storedCount} total chunks across ${fetchResults.filter(r => r.stored > 0).length} articles`);
+
+    if (storedCount === 0) return "";
+
+    // 2b. RAG query: retrieve relevant chunks using the directive as the query
+    const directive = messages.find(m => m.role === "user")?.content || "";
+    const ragChunks = await queryChunks(sessionId, directive, 12);
+
+    // Log RAG retrieval to Langfuse
+    const callbacks = nodeConfig?.callbacks;
+    const handlers = Array.isArray(callbacks) ? callbacks : callbacks?.handlers || [];
+    const lfHandler = handlers.find(c => c instanceof CallbackHandler);
+    if (lfHandler?.traceId) {
+        const lf = lfHandler.langfuse || langfuse;
+        const p2scores = ragChunks.map(c => c.score);
+        const p2uniqueSources = new Set(ragChunks.map(c => c.url)).size;
+        lf.span({
+            traceId: lfHandler.traceId,
+            name: "rag_query_phase2",
+            input: { query: directive.slice(0, 500), sessionId, topK: 12 },
+            metadata: { agent: phase1AgentName, storedChunks: storedCount },
+        }).end({
+            output: ragChunks.map(c => ({ url: c.url, title: c.title, score: c.score, content: c.content.slice(0, 200) + "..." })),
+            metadata: { resultCount: ragChunks.length, avgScore: +(p2scores.reduce((a, b) => a + b, 0) / p2scores.length).toFixed(4), minScore: +Math.min(...p2scores).toFixed(4), uniqueSources: p2uniqueSources }
+        });
+    }
+
+    if (ragChunks.length === 0) return "";
+
+    // 2c. Single LLM extraction with retrieved chunks (instead of 5 per-URL calls)
+    const extractionAgentName = `${phase1AgentName.replace("_research", "")}_research_extraction`;
+    const ragContext = ragChunks.map((c, i) =>
+        `[${i + 1}] [Source: ${c.url}] (relevance: ${(c.score * 100).toFixed(0)}%)\n${c.content}`
+    ).join("\n\n");
+
+    const extractionPrompt = `You are an expert researcher. Below are excerpts from web articles retrieved via semantic search, ranked by relevance to the user's directive. Synthesize ONLY the industry best practices relevant to the directive. Cite sources using [Source: url] format. Be concise and directly applicable.`;
+
+    if (ctx && researchEvents) {
+        researchEvents.emit("prompt", { threadId: ctx.threadId, agent: extractionAgentName, prompt: extractionPrompt });
+    }
+
+    const extractionHistory = [
+        ...messages.filter(m => m.role === "user"),
+        { role: "system", content: extractionPrompt },
+        { role: "user", content: `[RETRIEVED RESEARCH CONTEXT]:\n${ragContext}\n\nSynthesize the relevant best practices from the research above.` }
+    ];
+
+    const stream = await llm.stream(extractionHistory, { ...nodeConfig, tags: ["hide_stream"] });
+    let extracted = "";
+    for await (const chunk of stream) {
+        const text = typeof chunk.content === 'string' ? chunk.content : String(chunk.content || "");
+        extracted += text;
+        if (ctx && researchEvents) {
+            researchEvents.emit("chunk", { threadId: ctx.threadId, agent: extractionAgentName, content: text });
+        }
+    }
+    if (ctx && researchEvents) {
+        researchEvents.emit("stop", { threadId: ctx.threadId, agent: extractionAgentName });
+    }
+
+    let cleaned = extracted.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "").replace(/<\/?think>/g, "").trim();
+    return cleaned
+        ? "\n\n[RESEARCH FINDINGS FROM WEB]:\n(Note: The following research represents aggregated industry trends and ideas synthesized from web sources. Use your professional judgment when considering this information.)\n\n" + cleaned
         : "";
 }
 
@@ -265,6 +311,14 @@ function extractStatus(content) {
     const matches = [...cleaned.matchAll(/STATUS:\s*([A-Z_]+)/g)];
     return matches.length ? matches[matches.length - 1][1] : null;
 }
+
+// Milestones that trigger spawning a new thread — context resets at these boundaries
+const THREAD_SPAWN_MILESTONES = [
+    "REQUIREMENTS_DRAFTED",    // BA done → fan out to SA + UX
+    "REQUIREMENTS_APPROVED",   // BA approved → fan out to BE + FE
+    "DESIGN_APPROVED",         // SA/UX approved → fan out to BE + FE
+    "IMPLEMENTATION_APPROVED"  // BE/FE approved → go to QE
+];
 
 function cleanSpecialistOutput(content) {
     if (typeof content !== 'string') return String(content || "");
@@ -288,12 +342,14 @@ function getMsgContent(m) {
 
 function getPromptForNode(state, nodeName) {
     // 1. Identify "Milestones" to isolate context segments (Branching into a fresh state)
+    // NOTE: _CLEAR statuses are query-phase completions (confirmations), NOT work products.
+    // They must NOT be milestones — otherwise the agent's brief "looks good" review becomes
+    // the effectiveDirective, losing the actual requirements/design document.
     const MILESTONE_STATUSES = [
-        "DIRECTIVE_CLEAR", "REQUIREMENTS_CLEAR", "IMPLEMENTATION_CLEAR", "TESTING_CLEAR",
         "REQUIREMENTS_DRAFTED", "DESIGN_COMPLETE", "IMPLEMENTATION_COMPLETE", "TESTING_COMPLETE",
         "REQUIREMENTS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
     ];
-    const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt") && !getMsgName(m).endsWith("__research"));
+    const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt"));
     
     // Find the latest milestone to act as a context "firewall"
     let milestoneIndex = -1;
@@ -382,14 +438,14 @@ function getPromptForNode(state, nodeName) {
         self: selfLastContent,
         input: otherLastContent,
 
-        // Interaction / clarification history
+        // Interaction / clarification history — per-agent override or pipeline default
         hasClarifications: rounds.length > 0,
         clarificationHistory,
         clarificationRound: rounds.length,
         nextRoundNumber: rounds.length + 1,
-        maxClarificationRounds: getPipeline().maxClarificationRounds || 5,
-        clarificationsRemaining: Math.max(0, (getPipeline().maxClarificationRounds || 5) - rounds.length),
-        clarificationsExhausted: rounds.length >= (getPipeline().maxClarificationRounds || 5),
+        maxClarificationRounds: agent?.maxClarificationRounds || getPipeline().maxClarificationRounds || 5,
+        clarificationsRemaining: Math.max(0, (agent?.maxClarificationRounds || getPipeline().maxClarificationRounds || 5) - rounds.length),
+        clarificationsExhausted: rounds.length >= (agent?.maxClarificationRounds || getPipeline().maxClarificationRounds || 5),
 
         // Per-agent outputs
         last,
@@ -405,40 +461,45 @@ function getPromptForNode(state, nodeName) {
 
     const useToolsForMain = TOOL_ELIGIBLE_AGENTS.includes(nodeName);
 
+    const maxRounds = agent?.maxClarificationRounds || getPipeline().maxClarificationRounds || 5;
+    const roundMeta = { clarificationRound: rounds.length, maxClarificationRounds: maxRounds };
+
     // 2. If downstream agent sent work back for review (approval triggers from config)
     const routing = getRouting(nodeName);
     if (routing?.approval_triggers?.includes(lastMsgStatus) && hasPrompt("approval")) {
-        return { prompt: renderPrompt(nodeName, "approval", values), useTools: false };
+        return { prompt: renderPrompt(nodeName, "approval", values), useTools: false, ...roundMeta };
     }
 
     // 3. If answering a QUESTION from downstream
     if (lastMsgStatus === "QUESTION") {
-        return { prompt: renderPrompt(nodeName, "main", values), useTools: useToolsForMain };
+        return { prompt: renderPrompt(nodeName, "main", values), useTools: useToolsForMain, ...roundMeta };
     }
 
     // 4. Run query to clarify ambiguities unless already clarified or exhausted
     if (hasPrompt("query")) {
-        // We consider the query phase "done" if we've already reached a CLEAR, APPROVED, or DRAFTED state once.
+        // We consider the query phase "done" if we've already reached a terminal state once.
         const isPastQueryPhase = lastSelfStatus && (
             lastSelfStatus.endsWith("_CLEAR") ||
             lastSelfStatus.endsWith("_APPROVED") ||
-            lastSelfStatus.endsWith("_DRAFTED")
+            lastSelfStatus.endsWith("_DRAFTED") ||
+            lastSelfStatus.endsWith("_COMPLETE") ||
+            lastSelfStatus.endsWith("_PASSED")
         );
 
         // If the user just replied, stay in query mode to potentially ask follow-ups,
         // unless we've already moved past the query phase. The query prompt handles exhaustion warnings.
         if (!isPastQueryPhase) {
-            return { prompt: renderPrompt(nodeName, "query", values), useTools: false };
+            return { prompt: renderPrompt(nodeName, "query", values), useTools: false, ...roundMeta };
         }
     }
 
-    return { prompt: renderPrompt(nodeName, "main", values), useTools: useToolsForMain };
+    return { prompt: renderPrompt(nodeName, "main", values), useTools: useToolsForMain, ...roundMeta };
 }
 
 // Prompt node: generates the system prompt and commits it to state immediately
 function promptNode(nodeName, state) {
-    const { prompt, useTools } = getPromptForNode(state, nodeName);
-    return { messages: [new SystemMessage({ content: prompt, name: `${nodeName}__prompt`, additional_kwargs: { timestamp: Date.now(), useTools } })] };
+    const { prompt, useTools, clarificationRound, maxClarificationRounds } = getPromptForNode(state, nodeName);
+    return { messages: [new SystemMessage({ content: prompt, name: `${nodeName}__prompt`, additional_kwargs: { timestamp: Date.now(), useTools, clarificationRound, maxClarificationRounds } })] };
 }
 
 // Agent node: reads the prompt from state, calls the LLM, and auto-continues on truncation.
@@ -457,22 +518,54 @@ async function researchNode(nodeName, state, nodeConfig) {
     const lastMsg = validMsgs.length > 1 ? validMsgs[validMsgs.length - 1] : state.messages[0];
 
     const agentDef = config.agents[nodeName];
-    const llm = llms[agentDef?.model || "specialist"];
+    const llm = agentLLMs[nodeName] || llms[agentDef?.model || "specialist"];
+
+    // Detect if this is a subsequent round triggered by downstream ambiguities
+    const lastMsgContent = cleanSpecialistOutput(getMsgContent(lastMsg));
+    const lastMsgStatus = extractStatus(getMsgContent(lastMsg));
+    const questionStatuses = getPipeline().question_statuses || [];
+    const isAmbiguityRound = questionStatuses.includes(lastMsgStatus) || lastMsgStatus === "QUESTION";
+
+    let researchFocus = "";
+    if (isAmbiguityRound) {
+        researchFocus = `\n\nIMPORTANT: This is a subsequent research round triggered by feedback from ${getMsgName(lastMsg) || "a downstream agent"}. Focus your research ONLY on the specific ambiguities and unresolved items raised in their feedback below. Do NOT re-research topics already covered.`;
+    }
 
     const researchPrompt = `You are the ${nodeName}. Your task is ONLY to research industry best practices, standards, and existing solutions relevant to the user's directive and any team feedback.
 Today's date is ${new Date().toDateString()} (year ${new Date().getFullYear()}). When including years in search queries, always use ${new Date().getFullYear()} — never use older years like 2024 or 2025.
 Use the available tools to search the web and fetch pages.
 DO NOT draft the final response or requirements yet. Gather as much useful information as possible using the tools.
-When you are done researching, or if no research is needed, simply stop calling tools.`;
+When you are done researching, or if no research is needed, simply stop calling tools.${researchFocus}`;
+
+    // When receiving feedback from a parallel sync group, include ALL member messages
+    const parentGroup = syncGroups.find(g => g.parent === nodeName);
+    let researchUserContent;
+    if (parentGroup) {
+        const memberFeedback = [];
+        for (const member of parentGroup.members) {
+            const memberMsgs = validMsgs.filter(m => getMsgName(m) === member);
+            if (memberMsgs.length) {
+                const latest = memberMsgs[memberMsgs.length - 1];
+                memberFeedback.push(`[FEEDBACK FROM ${member}]:\n${cleanSpecialistOutput(getMsgContent(latest))}`);
+            }
+        }
+        if (memberFeedback.length > 1) {
+            researchUserContent = `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n${memberFeedback.join("\n\n")}`;
+        }
+    }
+    if (!researchUserContent) {
+        researchUserContent = `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${getMsgName(lastMsg) || lastMsg.role || "USER"}]:\n${lastMsgContent}`;
+    }
 
     let messagesToPass = [
         { role: "system", content: researchPrompt },
-        { role: "user", content: `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${getMsgName(lastMsg) || lastMsg.role || "USER"}]:\n${cleanSpecialistOutput(getMsgContent(lastMsg))}` }
+        { role: "user", content: researchUserContent }
     ];
 
     console.error(`[AGENT] ${nodeName}: running web research phase`);
     const threadId = nodeConfig?.configurable?.thread_id || "";
-    const research = await runResearch(llm, messagesToPass, { threadId, agent: `${nodeName}_research` }, nodeConfig);
+    const rootThreadId = nodeConfig?.configurable?.root_thread_id || threadId;
+    const research = await runResearch(llm, messagesToPass, { threadId, rootThreadId, agent: `${nodeName}_research` }, nodeConfig);
 
     if (research) {
         console.error(`[AGENT] ${nodeName}: research complete (${research.length} chars)`);
@@ -488,14 +581,15 @@ async function agentNode(nodeName, state, nodeConfig) {
     const lastPromptMsg = promptMsgs.length ? promptMsgs[promptMsgs.length - 1] : null;
     const systemPromptStr = lastPromptMsg ? getMsgContent(lastPromptMsg) : `You are ${nodeName}.`;
     const useTools = lastPromptMsg?.additional_kwargs?.useTools || false;
+    const clarificationRound = lastPromptMsg?.additional_kwargs?.clarificationRound ?? 0;
+    const maxClarificationRounds = lastPromptMsg?.additional_kwargs?.maxClarificationRounds ?? 5;
 
     // Identify the latest milestone for context isolation (same logic as getPromptForNode)
     const MILESTONE_STATUSES = [
-        "DIRECTIVE_CLEAR", "REQUIREMENTS_CLEAR", "IMPLEMENTATION_CLEAR", "TESTING_CLEAR",
         "REQUIREMENTS_DRAFTED", "DESIGN_COMPLETE", "IMPLEMENTATION_COMPLETE", "TESTING_COMPLETE",
         "REQUIREMENTS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
     ];
-    const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt") && !getMsgName(m).endsWith("__research"));
+    const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt"));
     let milestoneIndex = -1;
     for (let i = allMsgsRaw.length - 1; i >= 0; i--) {
         if (MILESTONE_STATUSES.includes(extractStatus(getMsgContent(allMsgsRaw[i])))) {
@@ -509,12 +603,12 @@ async function agentNode(nodeName, state, nodeConfig) {
     const lastMsg = lastNonPromptMsg || state.messages[state.messages.length - 1];
 
     const agentDef = config.agents[nodeName];
-    const llm = llms[agentDef?.model || "specialist"];
+    const llm = agentLLMs[nodeName] || llms[agentDef?.model || "specialist"];
 
     let accumulated = "";
-    
-    // Filter out __prompt and __research for context building
-    const validStateMsgs = state.messages.filter(m => !getMsgName(m).endsWith("__prompt") && !getMsgName(m).endsWith("__research") && getMsgName(m) !== nodeName);
+
+    // Filter out __prompt for context building (research messages are kept for downstream visibility)
+    const validStateMsgs = state.messages.filter(m => !getMsgName(m).endsWith("__prompt") && getMsgName(m) !== nodeName);
     const validLastMsg = validStateMsgs.length ? validStateMsgs[validStateMsgs.length - 1] : state.messages[0];
 
     // Find if there was research generated for THIS turn
@@ -525,28 +619,72 @@ async function agentNode(nodeName, state, nodeConfig) {
         researchText = getMsgContent(latestResearchMsg);
     }
 
-    // Context Pruning Interceptor: 
-    // 1. Truncate Research (8k chars max = ~2k tokens) to prevent KV cache explosion
-    const MAX_RESEARCH_CHARS = 8000;
-    const prunedResearch = researchText.length > MAX_RESEARCH_CHARS 
-        ? researchText.slice(0, MAX_RESEARCH_CHARS) + "\n\n[... Research findings truncated to save context window]" 
-        : researchText;
-
-    // 2. Truncate Directive if this is a late-stage revision or after a Milestone
+    // Context building — the system prompt template already includes directive, input,
+    // feedback ({{last.*}}), self, and clarification history via Mustache variables.
+    // User content only carries research/RAG context to avoid duplication.
     let directiveToPass = cleanSpecialistOutput(directiveMsg);
-    if ((state.messages.length > 20 || milestoneIndex !== -1) && directiveToPass.length > 2000) {
-        directiveToPass = directiveToPass.slice(0, 1500) + "\n\n[... directive truncated for length; see current status for full details]";
+
+    let userContent = "Proceed with the task described in your system prompt.";
+    if (researchText) {
+        userContent = researchText;
     }
 
-    let userContent = `[ORIGINAL DIRECTIVE]:\n${directiveToPass}\n\n[LATEST UPDATE FROM ${getMsgName(validLastMsg) || validLastMsg.role || "USER"}]:\n${cleanSpecialistOutput(getMsgContent(validLastMsg))}`;
-    if (prunedResearch) {
-        userContent += "\n\n" + prunedResearch;
+    // RAG: inject relevant research context from the vector DB for all agents
+    // Use root_thread_id so spawned threads can access research from the parent chain
+    const threadId = nodeConfig?.configurable?.thread_id || "";
+    const rootThreadId = nodeConfig?.configurable?.root_thread_id || threadId;
+    try {
+        const ragQuery = directiveToPass.slice(0, 500) + " " + cleanSpecialistOutput(getMsgContent(validLastMsg)).slice(0, 500);
+        const ragChunks = await queryChunks(rootThreadId, ragQuery, 6);
+        if (ragChunks.length > 0) {
+            const ragContext = ragChunks.map(c => `[Source: ${c.url}]\n${c.content}`).join("\n\n");
+            userContent += `\n\n[RESEARCH CONTEXT FROM WEB]:\n${ragContext}`;
+
+            // Log RAG retrieval to Langfuse
+            const agentCallbacks = nodeConfig?.callbacks;
+            const agentHandlers = Array.isArray(agentCallbacks) ? agentCallbacks : agentCallbacks?.handlers || [];
+            const agentLfHandler = agentHandlers.find(c => c instanceof CallbackHandler);
+            if (agentLfHandler?.traceId) {
+                const lf = agentLfHandler.langfuse || langfuse;
+                const scores = ragChunks.map(c => c.score);
+                const uniqueSources = new Set(ragChunks.map(c => c.url)).size;
+                lf.span({
+                    traceId: agentLfHandler.traceId,
+                    name: `rag_query_${nodeName}`,
+                    input: { query: ragQuery.slice(0, 500), threadId, topK: 6 },
+                    metadata: { agent: nodeName },
+                }).end({
+                    output: ragChunks.map(c => ({ url: c.url, title: c.title, score: c.score, content: c.content.slice(0, 200) + "..." })),
+                    metadata: { resultCount: ragChunks.length, avgScore: +(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4), minScore: +Math.min(...scores).toFixed(4), uniqueSources }
+                });
+            }
+        }
+    } catch (err) {
+        console.error(`[RAG] Query failed for ${nodeName}: ${err.message}`);
     }
+
+    // Log clarification round to Langfuse
+    try {
+        const roundCallbacks = nodeConfig?.callbacks;
+        const roundHandlers = Array.isArray(roundCallbacks) ? roundCallbacks : roundCallbacks?.handlers || [];
+        const roundLfHandler = roundHandlers.find(c => c instanceof CallbackHandler);
+        if (roundLfHandler?.traceId) {
+            const lf = roundLfHandler.langfuse || langfuse;
+            lf.span({
+                traceId: roundLfHandler.traceId,
+                name: `agent_turn_${nodeName}`,
+                metadata: { agent: nodeName, clarificationRound, maxClarificationRounds, useTools },
+            }).end();
+        }
+    } catch {}
 
     let messagesToPass = [
         { role: "system", content: systemPromptStr },
         { role: "user", content: userContent }
     ];
+
+    const totalChars = systemPromptStr.length + userContent.length;
+    process.stderr.write(`[CONTEXT] ${nodeName}: system=${systemPromptStr.length.toLocaleString()} + user=${userContent.length.toLocaleString()} = ${totalChars.toLocaleString()} chars total\n`);
 
     for (let attempt = 0; attempt <= MAX_CONTINUATIONS; attempt++) {
         let chunkContent = "";
@@ -562,7 +700,14 @@ async function agentNode(nodeName, state, nodeConfig) {
         const status = extractStatus(accumulated);
         if (status) {
             // Complete response — commit the merged result
-            return { messages: [new AIMessage({ content: accumulated, name: nodeName, additional_kwargs: { timestamp: Date.now() } })] };
+            const kwargs = { timestamp: Date.now() };
+            // For spawn milestones, record the intended routing target so the server knows where the new thread should go
+            if (THREAD_SPAWN_MILESTONES.includes(status)) {
+                const routingDef = getRouting(nodeName);
+                const target = routingDef?.routes[status];
+                if (target) kwargs.spawnTarget = resolveTarget(target, nodeName, state);
+            }
+            return { messages: [new AIMessage({ content: accumulated, name: nodeName, additional_kwargs: kwargs })] };
         }
 
         if (attempt === MAX_CONTINUATIONS) {
@@ -649,6 +794,12 @@ function buildRouteFunction(agentId) {
 
         const resolved = resolveTarget(target, agentId, state);
 
+        // Spawn milestone: route to END so the server can spawn a new thread
+        if (THREAD_SPAWN_MILESTONES.includes(status)) {
+            console.log(`[ROUTER]: Spawn milestone ${status} from ${agentId} → END (server will spawn new thread targeting ${JSON.stringify(resolved)})`);
+            return [END];
+        }
+
         // If it routes to itself, let it loop without syncing.
         if (resolved.length === 1 && resolved[0] === agentId) {
             return resolved;
@@ -694,8 +845,21 @@ function routeFromStart(state) {
     }
 
     if (role === "assistant" && name && !name.endsWith("__prompt")) {
-        // If we rewound to an assistant message, we want to re-run THAT agent,
-        // not where its output would have routed to.
+        // Check if this message has a spawn milestone status — if so, route FORWARD
+        // (this happens when a new thread is seeded with the milestone output)
+        const status = extractStatus(getMsgContent(lastMsg));
+        if (status) {
+            const routingDef = getRouting(name);
+            if (routingDef?.routes[status]) {
+                const resolved = resolveTarget(routingDef.routes[status], name, state);
+                console.log(`[ROUTER]: Spawned thread routing forward from ${name} (${status}) → ${JSON.stringify(resolved)}`);
+                // Check sync groups
+                const group = syncGroups.find(p => p.members.includes(name));
+                if (group && resolved.some(t => t !== name)) return [`sync_${group.name}`];
+                return resolved;
+            }
+        }
+        // No routable status — rewind case: re-run that agent
         return [`${name}_prompt`];
     }
 
@@ -825,4 +989,4 @@ for (const group of syncGroups) {
 }
 
 const app = workflow.compile({ checkpointer });
-export { app, routerLLM, initConfig };
+export { app, routerLLM, initConfig, THREAD_SPAWN_MILESTONES, extractStatus };
