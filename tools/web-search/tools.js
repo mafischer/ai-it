@@ -73,6 +73,14 @@ function loadBrowserHeaders() {
 
 const BROWSER_HEADERS = loadBrowserHeaders();
 
+// Serialize DDG requests with a random delay to avoid rate limiting
+let _ddgQueue = Promise.resolve();
+
+function staggerDDG(fn) {
+  _ddgQueue = _ddgQueue.then(() => fn().finally(() => new Promise(r => setTimeout(r, 1000 + Math.random() * 2000))));
+  return _ddgQueue;
+}
+
 async function searchDDG(query, maxResults = 10) {
   const cacheKey = `${query}::${maxResults}`;
   const cached = cacheGet(cacheKey, "search");
@@ -81,39 +89,46 @@ async function searchDDG(query, maxResults = 10) {
     return cached;
   }
 
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const resp = await fetch(url, {
-    headers: { ...BROWSER_HEADERS, Referer: "https://duckduckgo.com/" },
-    redirect: "follow",
+  const results = await staggerDDG(async () => {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const resp = await fetch(url, {
+      headers: { ...BROWSER_HEADERS, Referer: "https://duckduckgo.com/" },
+      redirect: "follow",
+    });
+
+    if (!resp.ok) {
+      throw new Error(`DuckDuckGo returned ${resp.status}: ${resp.statusText}`);
+    }
+
+    const html = await resp.text();
+    const $ = cheerio.load(html);
+    const parsed = [];
+
+    $(".result").each((i, el) => {
+      if (parsed.length >= maxResults) return false;
+      const titleEl = $(el).find(".result__a");
+      const snippetEl = $(el).find(".result__snippet");
+      const title = titleEl.text().trim();
+      const snippet = snippetEl.text().trim();
+
+      let href = titleEl.attr("href") || "";
+      const uddgMatch = href.match(/[?&]uddg=([^&]+)/);
+      if (uddgMatch) {
+        href = decodeURIComponent(uddgMatch[1]);
+      }
+
+      if (title && href) {
+        parsed.push({ title, url: href, snippet });
+      }
+    });
+
+    return parsed;
   });
 
-  if (!resp.ok) {
-    throw new Error(`DuckDuckGo returned ${resp.status}: ${resp.statusText}`);
+  // Only cache non-empty results — empty results are likely DDG rate limiting, not genuine
+  if (results.length > 0) {
+    cacheSet(cacheKey, "search", results);
   }
-
-  const html = await resp.text();
-  const $ = cheerio.load(html);
-  const results = [];
-
-  $(".result").each((i, el) => {
-    if (results.length >= maxResults) return false;
-    const titleEl = $(el).find(".result__a");
-    const snippetEl = $(el).find(".result__snippet");
-    const title = titleEl.text().trim();
-    const snippet = snippetEl.text().trim();
-
-    let href = titleEl.attr("href") || "";
-    const uddgMatch = href.match(/[?&]uddg=([^&]+)/);
-    if (uddgMatch) {
-      href = decodeURIComponent(uddgMatch[1]);
-    }
-
-    if (title && href) {
-      results.push({ title, url: href, snippet });
-    }
-  });
-
-  cacheSet(cacheKey, "search", results);
   return results;
 }
 

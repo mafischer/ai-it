@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test';
 
+test.beforeEach(async ({ page }) => { page.on("console", msg => console.log("PAGE LOG:", msg.text())); page.on("pageerror", error => console.log("PAGE ERROR:", error.message)); });
+
 test.describe('Rewind Functionality', () => {
   test('should trigger rewind API when rewind button is clicked and reload messages', async ({ page }) => {
     // 1. Mock the API endpoints required to render the thread

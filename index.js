@@ -308,14 +308,28 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
 function extractStatus(content) {
     if (!content) return null;
     const cleaned = cleanSpecialistOutput(content);
-    const matches = [...cleaned.matchAll(/STATUS:\s*([A-Z_]+)/g)];
+    // Negative lookbehind: don't match prefixed patterns like SA_STATUS or UX_STATUS
+    const matches = [...cleaned.matchAll(/(?<![A-Z_])STATUS:\s*([A-Z_]+)/g)];
     return matches.length ? matches[matches.length - 1][1] : null;
+}
+
+// Extract per-agent statuses from approval prompts (e.g., "SA_STATUS: DESIGN_APPROVED", "UX_STATUS: DESIGN_AMBIGUOUS")
+function extractAgentStatuses(content) {
+    if (!content) return {};
+    const cleaned = cleanSpecialistOutput(content);
+    const result = {};
+    const matches = [...cleaned.matchAll(/([A-Z_]+)_STATUS:\s*([A-Z_]+)/g)];
+    for (const match of matches) {
+        result[match[1].toLowerCase()] = match[2];
+    }
+    return result;
 }
 
 // Milestones that trigger spawning a new thread — context resets at these boundaries
 const THREAD_SPAWN_MILESTONES = [
     "REQUIREMENTS_DRAFTED",    // BA done → fan out to SA + UX
     "REQUIREMENTS_APPROVED",   // BA approved → fan out to BE + FE
+    "DESIGNS_APPROVED",        // BA approved both designs (per-agent) → fan out to BE + FE
     "DESIGN_APPROVED",         // SA/UX approved → fan out to BE + FE
     "IMPLEMENTATION_APPROVED"  // BE/FE approved → go to QE
 ];
@@ -346,8 +360,8 @@ function getPromptForNode(state, nodeName) {
     // They must NOT be milestones — otherwise the agent's brief "looks good" review becomes
     // the effectiveDirective, losing the actual requirements/design document.
     const MILESTONE_STATUSES = [
-        "REQUIREMENTS_DRAFTED", "DESIGN_COMPLETE", "IMPLEMENTATION_COMPLETE", "TESTING_COMPLETE",
-        "REQUIREMENTS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
+        "REQUIREMENTS_DRAFTED", "TESTING_COMPLETE",
+        "REQUIREMENTS_APPROVED", "DESIGNS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
     ];
     const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt"));
     
@@ -362,7 +376,7 @@ function getPromptForNode(state, nodeName) {
 
     // "Branching" the state: only use messages from the last milestone forward for context building
     const allMsgs = milestoneIndex !== -1 ? allMsgsRaw.slice(milestoneIndex) : allMsgsRaw;
-    const effectiveDirective = milestoneIndex !== -1 ? getMsgContent(allMsgsRaw[milestoneIndex]) : getMsgContent(state.messages[0]);
+    const effectiveDirective = milestoneIndex !== -1 ? cleanSpecialistOutput(getMsgContent(allMsgsRaw[milestoneIndex])) : getMsgContent(state.messages[0]);
 
     const msgs = allMsgs.filter(m => getMsgName(m) === nodeName);
     const lastSelfStatus = msgs.length ? extractStatus(getMsgContent(msgs[msgs.length - 1])) : null;
@@ -488,7 +502,7 @@ function getPromptForNode(state, nodeName) {
 
         // If the user just replied, stay in query mode to potentially ask follow-ups,
         // unless we've already moved past the query phase. The query prompt handles exhaustion warnings.
-        if (!isPastQueryPhase) {
+        if (!isPastQueryPhase && !values.clarificationsExhausted) {
             return { prompt: renderPrompt(nodeName, "query", values), useTools: false, ...roundMeta };
         }
     }
@@ -586,8 +600,8 @@ async function agentNode(nodeName, state, nodeConfig) {
 
     // Identify the latest milestone for context isolation (same logic as getPromptForNode)
     const MILESTONE_STATUSES = [
-        "REQUIREMENTS_DRAFTED", "DESIGN_COMPLETE", "IMPLEMENTATION_COMPLETE", "TESTING_COMPLETE",
-        "REQUIREMENTS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
+        "REQUIREMENTS_DRAFTED", "TESTING_COMPLETE",
+        "REQUIREMENTS_APPROVED", "DESIGNS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
     ];
     const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt"));
     let milestoneIndex = -1;
@@ -698,14 +712,34 @@ async function agentNode(nodeName, state, nodeConfig) {
 
         // Check if the response has a STATUS token (after stripping <think> blocks)
         const status = extractStatus(accumulated);
-        if (status) {
+        // Also check for per-agent approvals (e.g., BA approval with SA_STATUS + UX_STATUS)
+        const agentStatuses = !status ? extractAgentStatuses(accumulated) : {};
+        const allPerAgentApproved = Object.keys(agentStatuses).length > 0 &&
+            Object.values(agentStatuses).every(s => s.includes("APPROVED"));
+        const effectiveStatus = status || (allPerAgentApproved ? "DESIGNS_APPROVED" : null);
+
+        if (effectiveStatus) {
             // Complete response — commit the merged result
             const kwargs = { timestamp: Date.now() };
             // For spawn milestones, record the intended routing target so the server knows where the new thread should go
-            if (THREAD_SPAWN_MILESTONES.includes(status)) {
+            if (THREAD_SPAWN_MILESTONES.includes(effectiveStatus)) {
                 const routingDef = getRouting(nodeName);
-                const target = routingDef?.routes[status];
+                const target = routingDef?.routes[effectiveStatus];
                 if (target) kwargs.spawnTarget = resolveTarget(target, nodeName, state);
+                // For per-agent approvals, carry forward the individual design outputs as spawn context
+                if (allPerAgentApproved) {
+                    const agentKeyToId = { sa: "software_architect", ux: "ux_designer" };
+                    const spawnContext = [];
+                    for (const key of Object.keys(agentStatuses)) {
+                        const agentId = agentKeyToId[key];
+                        if (!agentId) continue;
+                        const agentMsgs = state.messages.filter(m => getMsgName(m) === agentId && !getMsgName(m).endsWith("__prompt") && !getMsgName(m).endsWith("__research"));
+                        if (agentMsgs.length) {
+                            spawnContext.push({ name: agentId, content: cleanSpecialistOutput(getMsgContent(agentMsgs[agentMsgs.length - 1])) });
+                        }
+                    }
+                    if (spawnContext.length) kwargs.spawnContext = spawnContext;
+                }
             }
             return { messages: [new AIMessage({ content: accumulated, name: nodeName, additional_kwargs: kwargs })] };
         }
@@ -782,7 +816,42 @@ function buildRouteFunction(agentId) {
         const msgs = state.messages.filter(m => getMsgName(m) === agentId && !getMsgName(m).endsWith("__prompt") && !getMsgName(m).endsWith("__research"));
         if (!msgs.length) return fallbackRouter(state, agentId);
         const lastMsg = msgs[msgs.length - 1];
-        const status = extractStatus(getMsgContent(lastMsg));
+        const content = getMsgContent(lastMsg);
+        const status = extractStatus(content);
+
+        // Handle per-agent statuses from approval prompts (e.g., SA_STATUS / UX_STATUS)
+        const agentStatuses = extractAgentStatuses(content);
+        if (Object.keys(agentStatuses).length > 0) {
+            const agentKeyToId = { sa: "software_architect", ux: "ux_designer" };
+            const ambiguousTargets = [];
+            const approvedDownstream = [];
+
+            for (const [key, agentStatus] of Object.entries(agentStatuses)) {
+                const targetAgentId = agentKeyToId[key];
+                if (!targetAgentId) continue;
+                if (agentStatus.includes("AMBIGUOUS")) {
+                    ambiguousTargets.push(targetAgentId);
+                } else if (agentStatus.includes("APPROVED")) {
+                    approvedDownstream.push(targetAgentId);
+                }
+            }
+
+            if (ambiguousTargets.length > 0) {
+                console.log(`[ROUTER]: ${agentId} per-agent review — ambiguous: [${ambiguousTargets.join(", ")}], approved: [${approvedDownstream.join(", ")}]`);
+                return ambiguousTargets;
+            }
+
+            // All approved — use the DESIGNS_APPROVED route
+            const approvedTarget = routingDef.routes["DESIGNS_APPROVED"];
+            if (approvedTarget) {
+                if (THREAD_SPAWN_MILESTONES.includes("DESIGNS_APPROVED")) {
+                    console.log(`[ROUTER]: Spawn milestone DESIGNS_APPROVED from ${agentId} (per-agent all approved) → END (server will spawn new thread)`);
+                    return [END];
+                }
+                console.log(`[ROUTER]: ${agentId} per-agent review — all designs approved → routing to implementation.`);
+                return resolveTarget(approvedTarget, agentId, state);
+            }
+        }
 
         if (!status) {
             console.log(`[ROUTER]: Missing status token for ${agentId}. Assuming truncation and auto-continuing.`);
@@ -847,12 +916,23 @@ function routeFromStart(state) {
     if (role === "assistant" && name && !name.endsWith("__prompt")) {
         // Check if this message has a spawn milestone status — if so, route FORWARD
         // (this happens when a new thread is seeded with the milestone output)
-        const status = extractStatus(getMsgContent(lastMsg));
-        if (status) {
+        const msgContent = getMsgContent(lastMsg);
+        const status = extractStatus(msgContent);
+
+        // Also check for per-agent approvals (spawned from BA approval with SA_STATUS/UX_STATUS)
+        let effectiveStatus = status;
+        if (!status) {
+            const agentStatuses = extractAgentStatuses(msgContent);
+            const allApproved = Object.keys(agentStatuses).length > 0 &&
+                Object.values(agentStatuses).every(s => s.includes("APPROVED"));
+            if (allApproved) effectiveStatus = "DESIGNS_APPROVED";
+        }
+
+        if (effectiveStatus) {
             const routingDef = getRouting(name);
-            if (routingDef?.routes[status]) {
-                const resolved = resolveTarget(routingDef.routes[status], name, state);
-                console.log(`[ROUTER]: Spawned thread routing forward from ${name} (${status}) → ${JSON.stringify(resolved)}`);
+            if (routingDef?.routes[effectiveStatus]) {
+                const resolved = resolveTarget(routingDef.routes[effectiveStatus], name, state);
+                console.log(`[ROUTER]: Spawned thread routing forward from ${name} (${effectiveStatus}) → ${JSON.stringify(resolved)}`);
                 // Check sync groups
                 const group = syncGroups.find(p => p.members.includes(name));
                 if (group && resolved.some(t => t !== name)) return [`sync_${group.name}`];
@@ -940,34 +1020,53 @@ for (const group of syncGroups) {
 
         if (parentIndex === -1) return [END];
 
+        // Determine which members were actually triggered this round
+        // by checking for __prompt messages after the parent's last output
+        const triggeredMembers = new Set();
+        for (let i = 0; i < state.messages.length; i++) {
+            const name = getMsgName(state.messages[i]);
+            // Find prompt messages after the parent's output position
+            if (name && group.members.some(m => name === `${m}__prompt`)) {
+                // Check if this prompt is after the parent's last output by comparing timestamps
+                const parentTs = msgs[parentIndex].additional_kwargs?.timestamp || 0;
+                const promptTs = state.messages[i].additional_kwargs?.timestamp || 0;
+                if (promptTs > parentTs) {
+                    triggeredMembers.add(name.replace("__prompt", ""));
+                }
+            }
+        }
+
+        // If we can't determine triggered members, assume all (first round)
+        const expectedMembers = triggeredMembers.size > 0 ? [...triggeredMembers] : group.members;
+
         const memberMsgs = {};
-        group.members.forEach(m => memberMsgs[m] = null);
+        expectedMembers.forEach(m => memberMsgs[m] = null);
 
         for (let i = parentIndex + 1; i < msgs.length; i++) {
             const name = getMsgName(msgs[i]);
-            if (group.members.includes(name)) {
+            if (expectedMembers.includes(name)) {
                 memberMsgs[name] = msgs[i];
             }
         }
 
         const allFinished = Object.values(memberMsgs).every(msg => msg !== null);
         if (!allFinished) {
-            console.log(`[SYNC]: Waiting for all members of ${group.name} to finish.`);
+            console.log(`[SYNC]: Waiting for ${expectedMembers.filter(m => !memberMsgs[m]).join(", ")} of ${group.name} to finish.`);
             return [];
         }
 
-        console.log(`[SYNC]: All members of ${group.name} finished. Evaluating combined routing.`);
+        console.log(`[SYNC]: All expected members of ${group.name} finished (${expectedMembers.join(", ")}). Evaluating combined routing.`);
 
         const allTargets = new Set();
         let requiresParentClarification = false;
 
-        for (const member of group.members) {
+        for (const member of expectedMembers) {
             const msg = memberMsgs[member];
             const status = extractStatus(getMsgContent(msg));
             const memberRoutingDef = getRouting(member);
             const targetToken = memberRoutingDef?.routes[status] || "$self";
             const resolved = resolveTarget(targetToken, member, state);
-            
+
             for (const t of resolved) {
                 if (t === member) continue;
                 allTargets.add(t);
@@ -989,4 +1088,4 @@ for (const group of syncGroups) {
 }
 
 const app = workflow.compile({ checkpointer });
-export { app, routerLLM, initConfig, THREAD_SPAWN_MILESTONES, extractStatus };
+export { app, routerLLM, initConfig, THREAD_SPAWN_MILESTONES, extractStatus, extractAgentStatuses };

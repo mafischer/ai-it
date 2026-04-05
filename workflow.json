@@ -19,9 +19,9 @@
     },
     "olmx": {
       "url": [
-        "http://localhost:8001/v1",
-        "http://10.1.0.3:8001/v1"
+        "http://10.1.0.202:8001/v1"
       ],
+      "apiKey": "${OMLX_KEY}",
       "capabilities": [
         "text",
         "reasoning"
@@ -31,7 +31,7 @@
   "models": {
     "specialist": {
       "engine": "olmx",
-      "modelId": "Qwopus3.5-27B-v2-MLX-mixed-4-6-bit"
+      "modelId": "Qwen3.5-122B-A10B-5bit"
     },
     "router": {
       "engine": "llama-server",
@@ -199,6 +199,10 @@
           "ux_designer"
         ],
         "REQUIREMENTS_APPROVED": [
+          "backend_software_engineer",
+          "frontend_software_engineer"
+        ],
+        "DESIGNS_APPROVED": [
           "backend_software_engineer",
           "frontend_software_engineer"
         ],

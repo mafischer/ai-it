@@ -16,7 +16,7 @@ import { CallbackHandler } from "langfuse-langchain";
 import { Langfuse } from "langfuse";
 
 // Import app last to ensure process.env is set before index.js initializes Langfuse
-import { app, routerLLM as utilityLLM, initConfig, researchEvents, THREAD_SPAWN_MILESTONES, extractStatus as extractStatusFromContent } from "./index.js";
+import { app, routerLLM as utilityLLM, initConfig, researchEvents, THREAD_SPAWN_MILESTONES, extractStatus as extractStatusFromContent, extractAgentStatuses } from "./index.js";
 import { getAgentEmojis, getAgentMissions, getActiveAgents, getConfig, getPipeline } from "./src/config/loader.js";
 import { registerTools } from "./tools/web-search/tools.js";
 
@@ -391,7 +391,14 @@ server.post("/v1/chat/completions", async (request, reply) => {
 
             // Check if the last agent output was a spawn milestone
             if (lastAgentContent) {
-                const lastStatus = extractStatusFromContent(lastAgentContent);
+                let lastStatus = extractStatusFromContent(lastAgentContent);
+                // Fallback: check for per-agent approvals (BA approval with SA_STATUS/UX_STATUS)
+                if (!lastStatus) {
+                    const perAgentStatuses = extractAgentStatuses(lastAgentContent);
+                    const allApproved = Object.keys(perAgentStatuses).length > 0 &&
+                        Object.values(perAgentStatuses).every(s => s.includes("APPROVED"));
+                    if (allApproved) lastStatus = "DESIGNS_APPROVED";
+                }
                 if (lastStatus && THREAD_SPAWN_MILESTONES.includes(lastStatus) && lastAgentName) {
                     return { spawn: true, status: lastStatus, agent: lastAgentName, content: lastAgentContent, threadId: currentThreadId };
                 }
@@ -415,11 +422,25 @@ server.post("/v1/chat/completions", async (request, reply) => {
                     const newThreadId = crypto.randomUUID().substring(0, 12);
                     console.error(`[SPAWN] Milestone ${result.status} from ${result.agent} in thread ${result.threadId} → spawning new thread ${newThreadId}`);
 
-                    // Seed the new thread: original directive + milestone output
+                    // Seed the new thread: original directive + context from prior agents + milestone output
                     const seedMessages = [
-                        new HumanMessage({ content: originalDirective, additional_kwargs: { timestamp: Date.now() } }),
-                        new AIMessage({ content: result.content, name: result.agent, additional_kwargs: { timestamp: Date.now() } })
+                        new HumanMessage({ content: originalDirective, additional_kwargs: { timestamp: Date.now() } })
                     ];
+                    // For per-agent approvals, include the individual design outputs as context
+                    try {
+                        const checkpointState = await app.getState({ configurable: { thread_id: result.threadId } });
+                        const lastCheckpointMsg = checkpointState?.values?.messages?.slice(-1)[0];
+                        const spawnContext = lastCheckpointMsg?.additional_kwargs?.spawnContext;
+                        if (spawnContext?.length) {
+                            for (const ctx of spawnContext) {
+                                seedMessages.push(new AIMessage({ content: ctx.content, name: ctx.name, additional_kwargs: { timestamp: Date.now() } }));
+                            }
+                            console.error(`[SPAWN] Including ${spawnContext.length} context messages from prior agents: ${spawnContext.map(c => c.name).join(", ")}`);
+                        }
+                    } catch (e) {
+                        console.error(`[SPAWN] Failed to read checkpoint for spawn context: ${e.message}`);
+                    }
+                    seedMessages.push(new AIMessage({ content: result.content, name: result.agent, additional_kwargs: { timestamp: Date.now() } }));
 
                     // Record the link
                     linkThreads(result.threadId, newThreadId, result.status, result.agent);
@@ -726,7 +747,9 @@ function parseCheckpointMessages(rawMsgs, threadId) {
                                 role: "system", name: "__boundary__", type: "boundary",
                                 content: `── ${lastStatus} ──`,
                                 milestoneStatus: lastStatus, milestoneAgent: m.name,
-                                timestamp: m.timestamp, rating: 0
+                                timestamp: m.timestamp, rating: 0,
+                                // Rewind target: the milestone message itself (rewinding to it re-triggers fan-out routing)
+                                _threadId: m._threadId, _threadMsgIndex: m._threadMsgIndex ?? m._origIndex,
                             });
                         }
                     }
@@ -767,7 +790,7 @@ server.get("/api/threads/:threadId/messages", async (request) => {
                 if (ti < threadIds.length - 1) {
                     const chain = getThreadChain(request.params.threadId);
                     const milestone = chain[ti + 1];
-                    allMsgs.push({ id: ["system", "ThreadBoundary"], kwargs: { content: `── Thread transition: ${milestone?.milestoneStatus || "milestone"} ──`, name: "__boundary__", additional_kwargs: { milestoneStatus: milestone?.milestoneStatus || "", milestoneAgent: milestone?.milestoneAgent || "" } }, type: "system" });
+                    allMsgs.push({ id: ["system", "ThreadBoundary"], kwargs: { content: `── Thread transition: ${milestone?.milestoneStatus || "milestone"} ──`, name: "__boundary__", additional_kwargs: { milestoneStatus: milestone?.milestoneStatus || "", milestoneAgent: milestone?.milestoneAgent || "" } }, type: "system", _chainThreadId: threadIds[ti + 1], _chainMsgIndex: 1 });
                 }
             } catch {}
         }
@@ -982,6 +1005,56 @@ server.post("/api/threads/:threadId/resume", async (request, reply) => {
         for (let i = msgs.length - 1; i >= 0; i--) {
             const name = msgs[i]?.name || msgs[i]?.kwargs?.name || "";
             if (!name.endsWith("__prompt")) { resumeIndex = i; break; }
+        }
+
+        // Check for orphaned prompts: agents that got a system prompt but never produced
+        // output AFTER that prompt (e.g., SA got a main prompt but was aborted before generating).
+        // This happens when parallel agents (SA + UX) are interrupted mid-execution.
+        // If found, rewind to before the orphaned prompt so all parallel agents re-trigger.
+        //
+        // Walk backwards from resumeIndex collecting the latest prompt per agent and checking
+        // if there's an output between that prompt and the resume point.
+        const lastPromptIdx = new Map(); // agent → index of latest prompt up to resumeIndex
+        const hasOutputAfterPrompt = new Set(); // agents with output after their latest prompt
+        // Scan up to resumeIndex (inclusive) for prompts
+        for (let i = 0; i <= resumeIndex; i++) {
+            const name = msgs[i]?.name || msgs[i]?.kwargs?.name || "";
+            if (name.endsWith("__prompt")) {
+                lastPromptIdx.set(name.replace(/__prompt$/, ""), i);
+            }
+        }
+        // Also check trailing prompts after resumeIndex (agent got prompt, never ran)
+        for (let i = resumeIndex + 1; i < msgs.length; i++) {
+            const name = msgs[i]?.name || msgs[i]?.kwargs?.name || "";
+            if (name.endsWith("__prompt")) {
+                const agent = name.replace(/__prompt$/, "");
+                if (!lastPromptIdx.has(agent) || i > lastPromptIdx.get(agent)) {
+                    lastPromptIdx.set(agent, i);
+                }
+            }
+        }
+        // For each agent with a prompt, check if there's output AFTER that prompt
+        for (const [agent, promptIdx] of lastPromptIdx) {
+            for (let i = promptIdx + 1; i <= resumeIndex; i++) {
+                const name = msgs[i]?.name || msgs[i]?.kwargs?.name || "";
+                const isHuman = msgs[i]?.type === "human" || (Array.isArray(msgs[i]?.id) && msgs[i].id.includes("HumanMessage"));
+                if (!isHuman && name === agent) {
+                    hasOutputAfterPrompt.add(agent);
+                    break;
+                }
+            }
+        }
+        const orphaned = [...lastPromptIdx.entries()].filter(([a]) => !hasOutputAfterPrompt.has(a));
+        if (orphaned.length > 0) {
+            const earliestOrphanIdx = Math.min(...orphaned.map(([, idx]) => idx));
+            let rewindTargetIdx = earliestOrphanIdx - 1;
+            while (rewindTargetIdx >= 0) {
+                const name = msgs[rewindTargetIdx]?.name || msgs[rewindTargetIdx]?.kwargs?.name || "";
+                if (!name.endsWith("__prompt")) break;
+                rewindTargetIdx--;
+            }
+            resumeIndex = Math.max(0, rewindTargetIdx);
+            console.error(`[RESUME] Orphaned prompts for [${orphaned.map(([a]) => a).join(", ")}] — rewinding to message ${resumeIndex} to re-trigger parallel group`);
         }
 
         // Delegate to the rewind handler
@@ -1323,7 +1396,14 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
 
             // Check for spawn milestone
             if (lastAgentContent) {
-                const lastStatus = extractStatusFromContent(lastAgentContent);
+                let lastStatus = extractStatusFromContent(lastAgentContent);
+                // Fallback: check for per-agent approvals (BA approval with SA_STATUS/UX_STATUS)
+                if (!lastStatus) {
+                    const perAgentStatuses = extractAgentStatuses(lastAgentContent);
+                    const allApproved = Object.keys(perAgentStatuses).length > 0 &&
+                        Object.values(perAgentStatuses).every(s => s.includes("APPROVED"));
+                    if (allApproved) lastStatus = "DESIGNS_APPROVED";
+                }
                 if (lastStatus && THREAD_SPAWN_MILESTONES.includes(lastStatus) && lastAgentName) {
                     return { spawn: true, status: lastStatus, agent: lastAgentName, content: lastAgentContent, threadId: currentThreadId };
                 }
@@ -1342,10 +1422,25 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                     const newThreadId = crypto.randomUUID().substring(0, 12);
                     console.error(`[SPAWN] Milestone ${result.status} from ${result.agent} in thread ${result.threadId} → spawning new thread ${newThreadId}`);
 
+                    // Seed the new thread: original directive + context from prior agents + milestone output
                     const seedMessages = [
-                        new HumanMessage({ content: rewindDirective, additional_kwargs: { timestamp: Date.now() } }),
-                        new AIMessage({ content: result.content, name: result.agent, additional_kwargs: { timestamp: Date.now() } })
+                        new HumanMessage({ content: rewindDirective, additional_kwargs: { timestamp: Date.now() } })
                     ];
+                    // For per-agent approvals, include the individual design outputs as context
+                    try {
+                        const checkpointState = await app.getState({ configurable: { thread_id: result.threadId } });
+                        const lastCheckpointMsg = checkpointState?.values?.messages?.slice(-1)[0];
+                        const spawnContext = lastCheckpointMsg?.additional_kwargs?.spawnContext;
+                        if (spawnContext?.length) {
+                            for (const ctx of spawnContext) {
+                                seedMessages.push(new AIMessage({ content: ctx.content, name: ctx.name, additional_kwargs: { timestamp: Date.now() } }));
+                            }
+                            console.error(`[SPAWN] Including ${spawnContext.length} context messages from prior agents: ${spawnContext.map(c => c.name).join(", ")}`);
+                        }
+                    } catch (e) {
+                        console.error(`[SPAWN] Failed to read checkpoint for spawn context: ${e.message}`);
+                    }
+                    seedMessages.push(new AIMessage({ content: result.content, name: result.agent, additional_kwargs: { timestamp: Date.now() } }));
 
                     linkThreads(result.threadId, newThreadId, result.status, result.agent);
 

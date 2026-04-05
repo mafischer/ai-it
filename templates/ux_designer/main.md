@@ -66,5 +66,6 @@ Incorporate ALL clarifications above into your output. The clarification phase i
 ## Your Previous UI/UX Design
 {{self}}
 
-If this is a revision, update your design based on the feedback provided in the requirements or clarification history.
+## Revision Instructions
+This is a revision round. Your previous design above is your baseline — **keep it intact**. Only make the **minimum changes** necessary to address feedback directed specifically at your UX design. Ignore feedback directed at the Software Architect or other specialists. Do NOT rewrite or restructure sections that were not flagged. Output your full updated design with the targeted fixes applied.
 {{/self}}

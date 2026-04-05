@@ -306,6 +306,9 @@ const ThreadDetail = {
             </span>
             <v-chip size="x-small" variant="tonal" class="ml-3">{{ section.messages.length }} msgs</v-chip>
             <v-progress-circular v-if="section.active" indeterminate size="14" width="2" color="primary" class="ml-2" />
+            <v-btn v-if="section.rewindTarget" icon size="x-small" variant="text" color="primary" class="ml-2" @click.stop="rewindSection(section.rewindTarget)" title="Rewind to this milestone and re-run all agents">
+              <v-icon size="small">mdi-skip-backward</v-icon>
+            </v-btn>
           </div>
 
           <!-- Section messages -->
@@ -591,7 +594,7 @@ const ThreadDetail = {
       rawSections.push(current);
       for (const m of messages.value) {
         if (m.type === "boundary") {
-          boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent });
+          boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent, _threadId: m._threadId, _threadMsgIndex: m._threadMsgIndex });
           current = { messages: [], active: false };
           rawSections.push(current);
         } else {
@@ -601,8 +604,11 @@ const ThreadDetail = {
       // Second pass: name each section
       const sections = rawSections.map((s, i) => {
         const nextBoundary = i < boundaries.length ? boundaries[i] : null;
+        const prevBoundary = i > 0 ? boundaries[i - 1] : null;
         const agent = nextBoundary ? (nextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
-        return { ...s, label: deriveSectionLabel(s, nextBoundary), agent };
+        // Sections after a milestone boundary get a rewind target to re-trigger all agents from the fan-out point
+        const rewindTarget = prevBoundary && prevBoundary._threadMsgIndex != null ? { threadId: prevBoundary._threadId || threadId, msgIndex: prevBoundary._threadMsgIndex } : null;
+        return { ...s, label: deriveSectionLabel(s, nextBoundary), agent, rewindTarget };
       });
       // Third pass: add round numbers for duplicate labels
       const labelCounts = {};
@@ -696,6 +702,21 @@ const ThreadDetail = {
       } catch (e) {
         alert("Rewind failed: " + e.message);
       }
+    }
+
+    async function rewindSection(target) {
+      if (!target) return;
+      if (!confirm("Rewind to thread " + target.threadId.slice(0, 8) + " and re-run all agents from this milestone?")) return;
+      try {
+        const r = await fetch("/api/threads/" + target.threadId + "/rewind", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messageIndex: target.msgIndex })
+        });
+        const d = await r.json();
+        if (d.error) alert(d.error);
+        if (target.threadId !== threadId) router.push("/admin/thread/" + target.threadId);
+        else pollAll();
+      } catch (e) { alert("Rewind failed: " + e.message); }
     }
 
     const router = useRouter();
@@ -959,7 +980,7 @@ const ThreadDetail = {
       if (currentStreamController) currentStreamController.abort();
     });
 
-    return { threadId, threadTitle, threadChain, messages, loading, active, activeAgents, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage, milestoneSections, isSectionOpen, toggleSection, msgIndex };
+    return { threadId, threadTitle, threadChain, messages, loading, active, activeAgents, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, rewindSection, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage, milestoneSections, isSectionOpen, toggleSection, msgIndex };
   }
 };
 

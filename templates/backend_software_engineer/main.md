@@ -29,5 +29,10 @@ The following clarifications were gathered:
 Incorporate ALL clarifications above into your output.
 {{/hasClarifications}}
 
-## Design
-{{input}}
+## Architect's Design
+{{last.software_architect}}
+
+{{#last.business_analyst}}
+## BA Review Notes
+{{last.business_analyst}}
+{{/last.business_analyst}}

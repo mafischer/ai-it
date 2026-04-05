@@ -146,6 +146,11 @@ function wrapWithGate(instance, gate, url) {
           }
         };
       }
+      // Preserve gate wrapping through bindTools — the bound instance must still
+      // go through this gate proxy so it's gated and round-robin-aware.
+      if (prop === "bindTools") {
+        return (...args) => wrapWithGate(target.bindTools(...args), gate, url);
+      }
       return Reflect.get(target, prop, receiver);
     }
   });
@@ -160,10 +165,10 @@ function wrapWithGate(instance, gate, url) {
  * createAgentLLM() so their round-robin counters are independent — ensuring
  * parallel agents always hit different endpoints.
  */
-function createRoundRobinLLM(instances) {
+function createRoundRobinLLM(instances, startIndex = 0) {
   if (instances.length === 1) return instances[0];
 
-  let index = 0;
+  let index = startIndex;
 
   return new Proxy(instances[0], {
     get(target, prop, receiver) {
@@ -173,6 +178,10 @@ function createRoundRobinLLM(instances) {
           index = (index + 1) % instances.length;
           return current[prop](...args);
         };
+      }
+      // Propagate bindTools across all instances so the bound LLM retains round-robin
+      if (prop === "bindTools") {
+        return (...args) => createRoundRobinLLM(instances.map(inst => inst.bindTools(...args)), index);
       }
       // Expose internals for cloning
       if (prop === "_rrInstances") return instances;
@@ -255,23 +264,6 @@ export function createAgentLLM(modelKey, agentIndex = 0) {
     )
   );
 
-  if (instances.length === 1) return instances[0];
-
   // Offset the starting index so parallel agents begin on different endpoints
-  let index = agentIndex % instances.length;
-
-  return new Proxy(instances[0], {
-    get(target, prop, receiver) {
-      if (prop === "stream" || prop === "invoke") {
-        return (...args) => {
-          const current = instances[index];
-          index = (index + 1) % instances.length;
-          return current[prop](...args);
-        };
-      }
-      if (prop === "_rrInstances") return instances;
-      if (prop === "_rrIndex") return index;
-      return Reflect.get(target, prop, receiver);
-    }
-  });
+  return createRoundRobinLLM(instances, agentIndex % instances.length);
 }

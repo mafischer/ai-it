@@ -2,6 +2,8 @@ import { test, expect } from '@playwright/test';
 
 const USE_MOCK_DATA = process.env.USE_MOCK_DATA !== 'false';
 
+test.beforeEach(async ({ page }) => { page.on("console", msg => console.log("PAGE LOG:", msg.text())); page.on("pageerror", error => console.log("PAGE ERROR:", error.message)); });
+
 test.describe('Chat Main Page UI', () => {
   const MOCK_THREAD_ID = 'chat-thread-789';
 
