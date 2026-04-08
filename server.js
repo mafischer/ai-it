@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
 import Database from "better-sqlite3";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import { fileURLToPath } from "url";
 import path from "path";
@@ -18,7 +18,8 @@ import { Langfuse } from "langfuse";
 // Import app last to ensure process.env is set before index.js initializes Langfuse
 import { app, routerLLM as utilityLLM, initConfig, researchEvents, THREAD_SPAWN_MILESTONES, extractStatus as extractStatusFromContent, extractAgentStatuses } from "./index.js";
 import { getAgentEmojis, getAgentMissions, getActiveAgents, getConfig, getPipeline } from "./src/config/loader.js";
-import { registerTools } from "./tools/web-search/tools.js";
+import { registerTools as registerWebSearch } from "./tools/web-search/tools.js";
+import { register } from "./tools/comfyui/index.js";
 
 console.log(`[LANGFUSE] Initialized with host: ${process.env.LANGFUSE_HOST || process.env.LANGFUSE_BASE_URL}`);
 
@@ -27,6 +28,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const server = Fastify({ logger: false });
 await server.register(fastifyCors);
 await server.register(fastifyStatic, { root: path.join(__dirname, "app"), prefix: "/" });
+
+// Serve generated images from MinIO URLs only - no local file serving
 
 const activeThreads = new Set();
 const threadAbortControllers = {};
@@ -569,6 +572,27 @@ server.post("/v1/chat/completions", async (request, reply) => {
     }
 });
 
+// ── Builder API ────────────────────────────────────────────────────────────────
+server.get("/api/workflows", async () => {
+    const fs = await import("fs");
+    const files = fs.readdirSync(__dirname).filter(f => f.endsWith(".json") && !f.includes("package") && !f.includes("flux_api"));
+    return files.map(f => f.replace('.json', ''));
+});
+server.get("/api/workflow", async (request) => {
+    const name = request.query.name || "workflow";
+    const filePath = path.join(__dirname, `${name}.json`);
+    if (!existsSync(filePath)) {
+        return { pipeline: { entry: "" }, agents: {}, routing: {} };
+    }
+    return JSON.parse(readFileSync(filePath, "utf8"));
+});
+server.put("/api/workflow", async (request) => {
+    const name = request.query.name || "workflow";
+    writeFileSync(path.join(__dirname, `${name}.json`), JSON.stringify(request.body, null, 2));
+    if (name === "workflow") initConfig();
+    return { success: true };
+});
+
 // ── Admin API ────────────────────────────────────────────────────────────────
 server.get("/api/threads", async () => {
     const db = getCheckpointDB();
@@ -720,6 +744,17 @@ function parseCheckpointMessages(rawMsgs, threadId) {
         rdb.close();
         const ratingsMap = new Map(ratings.map(r => [r.message_index, r.rating]));
         const withRatings = msgs.map((m, i) => ({ ...m, rating: ratingsMap.get(i) || 0, _origIndex: i }));
+
+        // Sort by timestamp to ensure chronological order (parallel agents may commit out of order).
+        // Only reorder messages that have timestamps; others keep checkpoint position.
+        // Use stable sort (V8 guarantees this) so equal-timestamp messages keep relative order.
+        withRatings.sort((a, b) => {
+            const ta = a.timestamp || 0;
+            const tb = b.timestamp || 0;
+            if (ta && tb) return ta - tb;
+            // If only one has a timestamp, or neither does, keep original order
+            return a._origIndex - b._origIndex;
+        });
 
         // Inject synthetic milestone boundaries based on status transitions
         // When an assistant message emits a spawn milestone status, insert a boundary after it
@@ -1252,6 +1287,9 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         const newAbortController = new AbortController();
         threadAbortControllers[threadId] = newAbortController;
 
+        // Emit an immediate active thread update so UI shows spinner right away
+        setTimeout(() => { }, 0); // No-op: adding to activeThreads is enough, UI polls every 5s
+
         let lastTokenTime = Date.now();
         const activeAgentSet = new Set(), agentStats = {};
         const syncActiveAgent = () => { activeThreadAgents[threadId] = { agents: [...activeAgentSet] }; };
@@ -1524,7 +1562,8 @@ const mcpSessions = {};
 
 async function createMcpSession() {
     const mcpServer = new McpServer({ name: "ai-it-tools", version: "1.0.0" });
-    registerTools(mcpServer);
+    registerWebSearch(mcpServer);
+    register(mcpServer);
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessioninitialized: (sid) => { mcpSessions[sid] = transport; },

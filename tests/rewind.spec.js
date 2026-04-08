@@ -16,34 +16,42 @@ test.describe('Rewind Functionality', () => {
       });
     });
 
+    // Mock the workflow endpoint (needed for milestone labels)
+    await page.route('**/api/workflow', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ pipeline: { entry: 'business_analyst', milestones: [] }, agents: {}, routing: {} })
+      });
+    });
+
     // Mock the thread messages
     const mockMessages = [
       { role: 'user', content: 'Create a test feature', timestamp: Date.now() },
       { role: 'assistant', name: 'business_analyst', content: 'STATUS: DIRECTIVE_AMBIGUOUS', timestamp: Date.now() + 1000 },
       { role: 'user', content: 'Here is the clarification', timestamp: Date.now() + 2000 }
     ];
-    
-    await page.route(`**/api/threads/${MOCK_THREAD_ID}/messages`, async (route) => {
-      await route.fulfill({ 
-        status: 200, 
+
+    await page.route(`**/api/threads/${MOCK_THREAD_ID}/messages**`, async (route) => {
+      await route.fulfill({
+        status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(mockMessages) 
+        body: JSON.stringify(mockMessages)
       });
     });
 
     // Mock the active status initially empty
     await page.route('**/api/active', async (route) => {
-      await route.fulfill({ 
-        status: 200, 
+      await route.fulfill({
+        status: 200,
         contentType: 'application/json',
-        body: JSON.stringify([]) 
+        body: JSON.stringify([])
       });
     });
 
     // Mock the SSE stream endpoint
     await page.route(`**/api/threads/${MOCK_THREAD_ID}/stream`, async (route) => {
-      // Just mock it so it doesn't fail
-      await route.fulfill({ 
+      await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
         body: 'data: [DONE]\n\n'
@@ -73,19 +81,19 @@ test.describe('Rewind Functionality', () => {
 
     // 3. Navigate to the thread
     await page.goto(`http://localhost:3000/#/admin/thread/${MOCK_THREAD_ID}`);
-    
-    // Wait for the UI to load the messages (class mb-3 wrapping v-card)
-    await expect(page.locator('.mb-3 .w-100')).toHaveCount(3);
-    
-    // Check that all three messages exist initially
-    await expect(page.getByText('Here is the clarification')).toBeVisible();
 
-    // 4. Click the "Rewind" button on the assistant message (index 1)
-    // Find the rewind button by its title attribute specifically for the second message
-    const rewindButton = page.locator('.mb-3 .w-100').nth(1).locator('button[title="Rewind to this point"]');
+    // Wait for message cards to render (each message is a v-card)
+    await expect(page.locator('button[title="Rewind to this point"]')).toHaveCount(3, { timeout: 10000 });
+
+    // Expand messages to see content
+    await page.getByText('Expand All').click();
+    await expect(page.getByText('Here is the clarification')).toBeVisible({ timeout: 5000 });
+
+    // 4. Click the "Rewind" button on the assistant message (second rewind button)
+    const rewindButton = page.locator('button[title="Rewind to this point"]').nth(1);
     await rewindButton.click();
 
-    // Wait for the fetch cycle (pollAll) to complete in the UI
+    // Wait for the fetch cycle to complete
     await page.waitForTimeout(500);
 
     // 5. Assert the rewind API was called correctly
@@ -93,8 +101,7 @@ test.describe('Rewind Functionality', () => {
     expect(rewindPayload).toEqual({ messageIndex: 1 });
 
     // 6. Assert that the UI refreshed the messages list (removing the last one)
-    // We expect the third message to disappear because our mock API truncated it
-    await expect(page.locator('.mb-3 .w-100')).toHaveCount(2);
+    await expect(page.locator('button[title="Rewind to this point"]')).toHaveCount(2, { timeout: 5000 });
     await expect(page.getByText('Here is the clarification')).toBeHidden();
   });
 });

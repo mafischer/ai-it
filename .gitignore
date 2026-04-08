@@ -21,3 +21,9 @@ test-results/
 
 # debugging
 test-*.js
+
+# MacOS
+.DS_Store
+
+# ComfyUI temp files
+.comfyui_temp/

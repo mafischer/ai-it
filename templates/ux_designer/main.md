@@ -22,13 +22,16 @@ For each screen/view in the application, provide:
 ### 3. Design System
 Define the core design tokens: color palette (with hex values), typography scale, spacing units, border radii, and component variants.
 
-### 4. Image Generation Prompts
-For each key screen, write a **Flux.dev image generation prompt** that could produce a realistic UI mockup. Format each as:
+### 4. Image Generation
+After describing each screen, **call the `generate_image_mockup` tool** to generate a visual mockup. Provide the tool with:
+- **prompt**: A detailed Flux prompt describing the UI mockup. Do NOT include `--ar` in the prompt text — use the parameters below instead.
+- **screen_name**: The name of the screen (e.g., "Main Menu", "Login Screen")
+- **aspect_ratio**: The aspect ratio as `"W:H"`. You MUST specify the orientation:
+  - **Portrait** (mobile): `"9:16"`, `"3:4"`
+  - **Landscape** (desktop/TV): `"16:9"`, `"4:3"`
+  - **Square**: `"1:1"`
 
-```
-[SCREEN: Screen Name]
-PROMPT: A high-fidelity UI mockup of [detailed visual description including layout, colors, typography, component placement, style, and mood]. Modern [platform] interface, clean design, [style references]. --ar [aspect ratio]
-```
+**IMPORTANT**: After calling the tool, include the returned URL in your design document as a markdown image: `![Processing mockup for Screen Name...](URL)`. The alt text serves as a graceful fallback while the image loads or if it is unavailable.
 
 Write prompts that are specific and detailed enough to generate an accurate representation of your design. Include concrete details about colors, element placement, visual hierarchy, and overall aesthetic.
 

@@ -86,6 +86,25 @@ const webResearchTools = [
     }
 ];
 
+const imageGenerationTools = [
+    {
+        type: "function",
+        function: {
+            name: "generate_image_mockup",
+            description: "Generate a UI mockup image using ComfyUI (Flux.dev). Accepts a Flux prompt string with optional aspect ratio. Returns a URL to the generated image. The prompt should describe the visual UI mockup in detail.",
+            parameters: {
+                type: "object",
+                properties: {
+                    prompt: { type: "string", description: "Detailed Flux prompt text describing the UI mockup. Do not include --ar in the text." },
+                    aspect_ratio: { type: "string", default: "9:16", description: "Aspect ratio as 'W:H'. Portrait: '9:16', '3:4'. Landscape: '16:9', '4:3'. Square: '1:1'." },
+                    screen_name: { type: "string", default: "UI Mockup", description: "Screen name for identification (e.g., 'Main Menu', 'Login Screen')." }
+                },
+                required: ["prompt"]
+            }
+        }
+    }
+];
+
 async function executeToolCall(call, ctx, nodeConfig) {
     const emit = (data) => { if (ctx) researchEvents.emit("tool", { ...data, threadId: ctx.threadId, agent: ctx.agent }); };
 
@@ -124,8 +143,34 @@ async function executeToolCall(call, ctx, nodeConfig) {
             if (span) span.end({ output: { title: meta.title, url: call.args.url, textLength: meta.text?.length } });
             return meta.text;
         }
+        if (call.name === "generate_image_mockup") {
+            console.error(`[TOOL] generate_image_mockup called for "${call.args.screen_name || 'UI'}"`);
+            emit({ type: "image_gen", status: "starting", screen: call.args.screen_name, prompt: call.args.prompt.slice(0, 100) });
+
+            // Heartbeat every 30s to keep the stale guard from killing long image generations
+            const heartbeat = setInterval(() => {
+                emit({ type: "image_gen", status: "generating", screen: call.args.screen_name });
+            }, 30000);
+
+            try {
+                const { generateMockup } = await import("./tools/comfyui/tools.js");
+                const result = await generateMockup(
+                    call.args.prompt,
+                    call.args.aspect_ratio || "9:16",
+                    call.args.screen_name || "UI Mockup"
+                );
+
+                emit({ type: "image_gen", status: "complete", screen: result.screenName, url: result.url });
+                if (span) span.end({ output: { url: result.url, dimensions: `${result.width}x${result.height}` } });
+
+                return `✅ Image generated:\n**Screen**: ${result.screenName}\n**Dimensions**: ${result.width}x${result.height}\n**URL**: ${result.url}\n\nMarkdown: ![${result.screenName}](${result.url})`;
+            } finally {
+                clearInterval(heartbeat);
+            }
+        }
     } catch (err) {
-        emit({ type: call.name === "web_search" ? "search" : "fetch", status: "error", error: err.message });
+        const toolType = call.name === "web_search" ? "search" : call.name === "fetch_page" ? "fetch" : "image_gen";
+        emit({ type: toolType, status: "error", error: err.message });
         if (span) span.end({ level: "ERROR", statusMessage: err.message });
         return `Error: ${err.message}`;
     }
@@ -583,7 +628,10 @@ When you are done researching, or if no research is needed, simply stop calling 
 
     if (research) {
         console.error(`[AGENT] ${nodeName}: research complete (${research.length} chars)`);
-        return { messages: [new AIMessage({ content: research, name: `${nodeName}__research`, additional_kwargs: { timestamp: Date.now() } })] };
+        // Count existing research messages for this agent to determine the round/suffix
+        const existingResearchCount = state.messages.filter(m => getMsgName(m).startsWith(`${nodeName}__research`)).length;
+        const researchName = existingResearchCount > 0 ? `${nodeName}__research_round_${existingResearchCount}` : `${nodeName}__research`;
+        return { messages: [new AIMessage({ content: research, name: researchName, additional_kwargs: { timestamp: Date.now() } })] };
     }
     return {};
 }
@@ -700,15 +748,49 @@ async function agentNode(nodeName, state, nodeConfig) {
     const totalChars = systemPromptStr.length + userContent.length;
     process.stderr.write(`[CONTEXT] ${nodeName}: system=${systemPromptStr.length.toLocaleString()} + user=${userContent.length.toLocaleString()} = ${totalChars.toLocaleString()} chars total\n`);
 
+    // Bind image generation tools for UX designer during main generation
+    let llmWithTools = llm;
+    if (nodeName === "ux_designer" && useTools) {
+        llmWithTools = llm.bindTools(imageGenerationTools);
+        console.error(`[AGENT] ${nodeName} bound ${imageGenerationTools.length} image generation tools`);
+    }
+
     for (let attempt = 0; attempt <= MAX_CONTINUATIONS; attempt++) {
         let chunkContent = "";
-        const stream = await llm.stream(messagesToPass, nodeConfig);
+        let toolCallsDetected = [];
+
+        const stream = await llmWithTools.stream(messagesToPass, nodeConfig);
         for await (const chunk of stream) {
             const text = typeof chunk.content === 'string' ? chunk.content : String(chunk.content || "");
             chunkContent += text;
+
+            // LangChain accumulates tool_calls across chunks; collect from every chunk
+            if (chunk.tool_calls && chunk.tool_calls.length > 0) {
+                for (const tc of chunk.tool_calls) {
+                    // Only add if not already tracked (by id)
+                    if (!toolCallsDetected.find(t => t.id === tc.id)) {
+                        toolCallsDetected.push(tc);
+                    }
+                }
+            }
         }
-        
+
         accumulated += chunkContent;
+
+        // If tool calls were made, execute them and continue
+        if (toolCallsDetected.length > 0) {
+            console.error(`[AGENT] ${nodeName}: ${toolCallsDetected.length} tool call(s) detected`);
+            messagesToPass.push(new AIMessage({ content: chunkContent, additional_kwargs: { tool_calls: toolCallsDetected.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: JSON.stringify(tc.args) } })) } }));
+
+            for (const toolCall of toolCallsDetected) {
+                console.error(`[AGENT] Executing tool: ${toolCall.name}`);
+                const toolResult = await executeToolCall(toolCall, { threadId, rootThreadId, agent: nodeName }, nodeConfig);
+                messagesToPass.push(new ToolMessage({ content: toolResult, tool_call_id: toolCall.id, name: toolCall.name }));
+            }
+
+            // Continue the conversation with tool results (don't increment attempt counter)
+            continue;
+        }
 
         // Check if the response has a STATUS token (after stripping <think> blocks)
         const status = extractStatus(accumulated);

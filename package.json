@@ -28,6 +28,7 @@
     "langfuse": "^3.38.6",
     "langfuse-langchain": "^3.38.6",
     "mustache": "^4.2.0",
+    "node-fetch": "^3.3.2",
     "pg": "^8.20.0",
     "undici": "^7.24.4",
     "zod": "^4.3.6"

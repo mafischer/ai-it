@@ -45,7 +45,67 @@
       "REQUIREMENTS_AMBIGUOUS",
       "QUESTION"
     ],
-    "maxClarificationRounds": 5
+    "maxClarificationRounds": 5,
+    "milestones": [
+      {
+        "id": "initiation",
+        "name": "Project Initiation",
+        "statuses": [
+          "DIRECTIVE_CLEAR",
+          "DIRECTIVE_AMBIGUOUS"
+        ],
+        "previous": null,
+        "next": "requirements"
+      },
+      {
+        "id": "requirements",
+        "name": "Requirements Definition",
+        "statuses": [
+          "REQUIREMENTS_CLEAR",
+          "REQUIREMENTS_AMBIGUOUS",
+          "REQUIREMENTS_DRAFTED",
+          "REQUIREMENTS_APPROVED"
+        ],
+        "previous": "initiation",
+        "next": "design"
+      },
+      {
+        "id": "design",
+        "name": "System & UX Design",
+        "statuses": [
+          "DESIGN_COMPLETE",
+          "DESIGN_APPROVED",
+          "DESIGN_SATISFIED"
+        ],
+        "previous": "requirements",
+        "next": "implementation"
+      },
+      {
+        "id": "implementation",
+        "name": "Implementation",
+        "statuses": [
+          "IMPLEMENTATION_COMPLETE",
+          "IMPLEMENTATION_APPROVED",
+          "IMPLEMENTATION_CLEAR",
+          "IMPLEMENTATION_AMBIGUOUS"
+        ],
+        "previous": "design",
+        "next": "qa"
+      },
+      {
+        "id": "qa",
+        "name": "Quality Assurance",
+        "statuses": [
+          "TESTING_COMPLETE",
+          "TESTING_CLEAR",
+          "TESTING_AMBIGUOUS",
+          "TESTS_PASSED",
+          "REJECTED"
+        ],
+        "previous": "implementation",
+        "next": null
+      }
+    ]
   },
   "agents": {
     "business_analyst": {
@@ -210,7 +270,7 @@
           "software_architect",
           "ux_designer"
         ],
-        "DIRECTIVE_CLEAR": "$self",
+        "DIRECTIVE_CLEAR": "business_analyst",
         "DIRECTIVE_AMBIGUOUS": "__end__",
         "QUESTION": "__end__"
       },
@@ -225,7 +285,7 @@
         "DESIGN_SATISFIED": "backend_software_engineer",
         "DESIGN_APPROVED": "backend_software_engineer",
         "QUESTION": "business_analyst",
-        "REQUIREMENTS_CLEAR": "$self",
+        "REQUIREMENTS_CLEAR": "software_architect",
         "REQUIREMENTS_AMBIGUOUS": "business_analyst"
       },
       "approval_triggers": [
@@ -239,7 +299,7 @@
         "DESIGN_APPROVED": "frontend_software_engineer",
         "DESIGN_SATISFIED": "frontend_software_engineer",
         "QUESTION": "business_analyst",
-        "REQUIREMENTS_CLEAR": "$self",
+        "REQUIREMENTS_CLEAR": "ux_designer",
         "REQUIREMENTS_AMBIGUOUS": "business_analyst"
       },
       "approval_triggers": [
