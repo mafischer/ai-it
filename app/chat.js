@@ -99,7 +99,7 @@ const ChatView = {
         <div v-if="!messages.length && !streaming" class="d-flex flex-column align-center justify-center flex-grow-1 pa-4">
           <v-icon size="64" color="primary" class="mb-4">mdi-brain</v-icon>
           <h2 class="text-h5 font-weight-bold mb-2" style="color:#cdd6f4">AI-IT</h2>
-          <p class="text-body-1 text-medium-emphasis mb-6">Multi-agent software engineering</p>
+          <p class="text-body-1 text-medium-emphasis mb-6">Multi-agent <s style="text-decoration: line-through;">software engineering</s> anything</p>
           <div style="width:100%;max-width:700px">
             <v-select
               v-model="selectedWorkflow"
@@ -440,40 +440,80 @@ const ChatView = {
     let chatPrevSectionCount = 0;
 
     const milestoneSections = computed(() => {
-      const rawSections = [];
-      const boundaries = [];
-      let current = { messages: [], active: false };
-      rawSections.push(current);
+      const milestones = workflowMilestones.value || [];
+      if (!milestones.length) {
+        const rawSections = [];
+        const boundaries = [];
+        let current = { messages: [], active: false };
+        rawSections.push(current);
+        for (const m of messages.value) {
+          if (m.type === "boundary") {
+            boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent });
+            current = { messages: [], active: false };
+            rawSections.push(current);
+          } else {
+            current.messages.push(m);
+          }
+        }
+        const sections = rawSections.map((s, i) => {
+          const thisNextBoundary = i < boundaries.length ? boundaries[i] : null;
+          const agent = thisNextBoundary ? (thisNextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
+          return { ...s, label: deriveSectionLabel(s, thisNextBoundary), agent };
+        });
+        const labelCounts = {};
+        sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
+        const labelCounters = {};
+        sections.forEach(s => {
+          if (labelCounts[s.label] > 1) {
+            labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
+            s.label = s.label + " (Round " + labelCounters[s.label] + ")";
+          }
+        });
+        if (sections.length && streaming.value) {
+          sections[sections.length - 1].active = true;
+        }
+        sections.forEach(s => {
+          if (s.messages.some(m => m._streaming)) s.active = true;
+        });
+        if (sections.length !== chatPrevSectionCount) {
+          Object.keys(chatSectionOverrides).forEach(k => delete chatSectionOverrides[k]);
+          chatPrevSectionCount = sections.length;
+        }
+        return sections;
+      }
+
+      const sectionsMap = new Map();
+      const sections = milestones.map(m => {
+        const s = { id: m.id, label: m.name, messages: [], active: false, agent: "", statuses: m.statuses || [] };
+        sectionsMap.set(m.id, s);
+        return s;
+      });
+
+      let currentMilestoneIndex = 0;
       for (const m of messages.value) {
         if (m.type === "boundary") {
-          boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent });
-          current = { messages: [], active: false };
-          rawSections.push(current);
+          const mIdx = milestones.findIndex(ms => ms.statuses && ms.statuses.includes(m.milestoneStatus));
+          if (mIdx !== -1) {
+            currentMilestoneIndex = mIdx;
+          }
+          if (mIdx !== -1 && mIdx + 1 < milestones.length) {
+            currentMilestoneIndex = mIdx + 1;
+          }
         } else {
-          current.messages.push(m);
+          sections[currentMilestoneIndex].messages.push(m);
+          if (m.role === "assistant" && m.name) {
+            sections[currentMilestoneIndex].agent = m.name;
+          }
         }
       }
-      const sections = rawSections.map((s, i) => {
-        const thisNextBoundary = i < boundaries.length ? boundaries[i] : null;
-        const agent = thisNextBoundary ? (thisNextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
-        return { ...s, label: deriveSectionLabel(s, thisNextBoundary), agent };
-      });
-      // Add round numbers for duplicate labels
-      const labelCounts = {};
-      sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
-      const labelCounters = {};
-      sections.forEach(s => {
-        if (labelCounts[s.label] > 1) {
-          labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
-          s.label = s.label + " (Round " + labelCounters[s.label] + ")";
-        }
-      });
-      if (sections.length && streaming.value) {
-        sections[sections.length - 1].active = true;
+
+      if (streaming.value) {
+        sections[currentMilestoneIndex].active = true;
       }
       sections.forEach(s => {
         if (s.messages.some(m => m._streaming)) s.active = true;
       });
+
       if (sections.length !== chatPrevSectionCount) {
         Object.keys(chatSectionOverrides).forEach(k => delete chatSectionOverrides[k]);
         chatPrevSectionCount = sections.length;

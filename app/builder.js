@@ -1,11 +1,11 @@
 (function() {
-const { ref, reactive, computed, onMounted, nextTick, watch } = Vue;
+const { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } = Vue;
 const { useTheme } = Vuetify;
 
 window.BuilderView = {
   template: `
     <v-layout class="fill-height">
-      <v-app-bar color="surface" border="b" density="compact">
+      <v-app-bar v-if="!isReadonly" color="surface" border="b" density="compact">
         <v-btn icon="mdi-arrow-left" @click="$router.push('/')"></v-btn>
         <v-app-bar-title>Workflow Builder <span v-if="currentWorkflow" class="text-caption text-medium-emphasis">({{ currentWorkflow }})</span></v-app-bar-title>
         <v-spacer></v-spacer>
@@ -14,7 +14,7 @@ window.BuilderView = {
 
       <v-main class="d-flex" style="height: 100vh; overflow: hidden;">
         <!-- Left Panel: Palette -->
-        <v-card class="ma-2 d-flex flex-column" border style="width: 250px; flex-shrink: 0;">
+        <v-card v-if="!isReadonly" class="ma-2 d-flex flex-column" border style="width: 250px; flex-shrink: 0;">
           <v-toolbar density="compact" color="surface-variant">
             <v-toolbar-title class="text-caption">Palette</v-toolbar-title>
           </v-toolbar>
@@ -39,11 +39,11 @@ window.BuilderView = {
                 </v-list-item>
               </template>
               <v-list-item v-for="(agent, agentId) in (workflowObj.agents || {})" :key="agentId"
-                draggable="true" @dragstart="onPaletteDragStart($event, 'agent_' + agentId)" class="cursor-move mx-2 mb-1 border rounded" style="background: #1e1e2e;">
+                draggable="true" @dragstart="onPaletteDragStart($event, 'agent_' + agentId)" class="cursor-move mx-2 mb-1 border rounded" style="background: #1e1e2e; padding-inline-start: 16px !important;">
                 <template v-slot:prepend><span class="mr-1">{{ agent.emoji || '\u{1F916}' }}</span></template>
                 <v-list-item-title class="text-caption">{{ agent.role || agentId }}</v-list-item-title>
               </v-list-item>
-              <v-list-item draggable="true" @dragstart="onPaletteDragStart($event, 'agent_new')" class="cursor-move mx-2 mb-1 border rounded border-dashed" style="background: #1e1e2e;">
+              <v-list-item draggable="true" @dragstart="onPaletteDragStart($event, 'agent_new')" class="cursor-move mx-2 mb-1 border rounded border-dashed" style="background: #1e1e2e; padding-inline-start: 16px !important;">
                 <template v-slot:prepend><v-icon color="primary" size="small">mdi-plus</v-icon></template>
                 <v-list-item-title class="text-caption">New Agent</v-list-item-title>
               </v-list-item>
@@ -56,7 +56,7 @@ window.BuilderView = {
                   <v-list-item-title>System Nodes</v-list-item-title>
                 </v-list-item>
               </template>
-              <v-list-item draggable="true" @dragstart="onPaletteDragStart($event, 'system')" class="cursor-move mx-2 mb-1 border rounded" style="background: #1e1e2e;">
+              <v-list-item draggable="true" @dragstart="onPaletteDragStart($event, 'system')" class="cursor-move mx-2 mb-1 border rounded" style="background: #1e1e2e; padding-inline-start: 16px !important;">
                 <template v-slot:prepend><v-icon color="deep-purple" size="small">mdi-cog</v-icon></template>
                 <v-list-item-title class="text-caption">System Node</v-list-item-title>
               </v-list-item>
@@ -70,7 +70,7 @@ window.BuilderView = {
           <v-toolbar density="compact" color="surface-variant" style="z-index: 20;">
             <v-toolbar-title class="text-caption">Visual Flow</v-toolbar-title>
             <v-spacer></v-spacer>
-            <v-btn-toggle v-model="viewMode" mandatory density="compact" class="mr-2" color="primary">
+            <v-btn-toggle v-if="!isReadonly" v-model="viewMode" mandatory density="compact" class="mr-2" color="primary">
               <v-btn value="visual" size="small" prepend-icon="mdi-graph">Visual</v-btn>
               <v-btn value="json" size="small" prepend-icon="mdi-code-json">JSON</v-btn>
             </v-btn-toggle>
@@ -82,7 +82,7 @@ window.BuilderView = {
               <v-btn icon="mdi-magnify-plus" size="small" @click="zoomIn" title="Zoom In"></v-btn>
               <v-btn icon="mdi-magnify-scan" size="small" @click="resetZoom" title="Reset Zoom"></v-btn>
               <v-divider vertical class="mx-2"></v-divider>
-              <v-btn icon="mdi-refresh" size="small" @click="layoutNodes(false)" title="Auto Layout"></v-btn>
+              <v-btn v-if="!isReadonly" icon="mdi-refresh" size="small" @click="layoutNodes(false)" title="Auto Layout"></v-btn>
             </template>
           </v-toolbar>
 
@@ -101,10 +101,10 @@ window.BuilderView = {
               <!-- Milestone Bounding Boxes (draggable) -->
               <div v-for="box in milestoneBoxes" :key="'mb-'+box.id"
                    class="position-absolute rounded"
-                   :style="{ left: box.x + 'px', top: box.y + 'px', width: box.width + 'px', height: box.height + 'px', border: '2px dashed rgba(88, 166, 255, 0.3)', zIndex: 5, cursor: 'grab' }"
-                   @mousedown.stop="startMilestoneDrag(box.id, $event)">
-                <div class="position-absolute" style="top: -20px; left: 10px; font-size: 11px; color: rgba(88, 166, 255, 0.7); font-weight: bold; text-transform: uppercase;">
-                  {{ box.label }}
+                   :style="{ left: box.x + 'px', top: box.y + 'px', width: box.width + 'px', height: box.height + 'px', border: isActiveMilestone(box.id) ? '2px dashed #4caf50' : '2px dashed rgba(88, 166, 255, 0.3)', zIndex: 5, cursor: isReadonly ? 'default' : 'grab' }"
+                   @mousedown.stop="!isReadonly ? startMilestoneDrag(box.id, $event) : null">
+                <div class="position-absolute" style="top: -20px; left: 10px; font-size: 11px; font-weight: bold; text-transform: uppercase;" :style="{ color: isActiveMilestone(box.id) ? '#4caf50' : 'rgba(88, 166, 255, 0.7)' }">
+                  {{ box.label }}<v-progress-circular v-if="isActiveMilestone(box.id)" indeterminate size="10" width="1" color="success" class="ml-1"></v-progress-circular>
                 </div>
                 <!-- Milestone Connection Dots (incoming top, outgoing bottom) -->
                 <div class="position-absolute" style="left: 50%; transform: translateX(-50%); top: -6px; width: 12px; height: 12px; background: #1e1e2e; border: 2px solid rgba(88, 166, 255, 0.5); border-radius: 50%;"></div>
@@ -113,6 +113,14 @@ window.BuilderView = {
 
               <!-- SVG Edges -->
               <svg style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;" v-if="nodes.length || drawingEdge.active || milestoneEdges.length">
+                <defs>
+                  <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#58a6ff" />
+                  </marker>
+                  <marker id="arrowhead-active" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#4caf50" />
+                  </marker>
+                </defs>
                 <defs>
                   <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
                     <polygon points="0 0, 10 3.5, 0 7" fill="#58a6ff" />
@@ -141,7 +149,7 @@ window.BuilderView = {
                      background: '#1e1e2e',
                      border: node.nodeType === 'milestone' ? '2px dashed rgba(88, 166, 255, 0.6)' : node.nodeType === 'user' ? '1px solid #26a69a' : node.nodeType === 'system' ? '1px solid #7e57c2' : '1px solid #313244',
                      boxShadow: '0 4px 6px rgba(0,0,0,0.3)' }"
-                   @mousedown.stop="startDrag(node, $event)"
+                   @mousedown.stop="!isReadonly ? startDrag(node, $event) : null"
                    @dblclick.stop="editNode(node)">
 
                 <!-- Input Dot (Top Center) -->
@@ -291,6 +299,7 @@ window.BuilderView = {
           <v-card-text>
             <!-- User Node -->
             <template v-if="editorDialog.node.nodeType === 'user'">
+              <v-combobox v-model="editorDialog.milestoneId" :items="availableMilestones" item-title="title" item-value="value" label="Milestone" hint="Select an existing milestone or type a new one" persistent-hint class="mb-4"></v-combobox>
               <v-text-field v-model="editorDialog.task" label="Task / Purpose" hint="What the user does at this point (e.g. 'Clarify requirements', 'Approve design')" persistent-hint class="mb-4"></v-text-field>
               <v-divider class="my-4"></v-divider>
               <div class="text-h6 mb-2 d-flex align-center">
@@ -306,6 +315,7 @@ window.BuilderView = {
             </template>
             <!-- System Node -->
             <template v-else-if="editorDialog.node.nodeType === 'system'">
+              <v-combobox v-model="editorDialog.milestoneId" :items="availableMilestones" item-title="title" item-value="value" label="Milestone" hint="Select an existing milestone or type a new one" persistent-hint class="mb-4"></v-combobox>
               <v-text-field v-model="editorDialog.label" label="Node Label" class="mb-4"></v-text-field>
               <v-textarea v-model="editorDialog.description" label="Description" rows="2" class="mb-4"></v-textarea>
               <v-divider class="my-4"></v-divider>
@@ -349,7 +359,7 @@ window.BuilderView = {
               </div>
 
               <div v-if="editorDialog.agentId" class="pa-4 bg-surface-variant rounded mb-4">
-                <div class="text-subtitle-2 mb-2">Agent Configuration (Global)</div>
+                <div class="text-subtitle-2 mb-2 text-white">Agent Configuration (Global)</div>
                 <div class="d-flex gap-4">
                   <v-text-field v-model="editorDialog.role" label="Role Name" class="flex-grow-1 mr-2" density="compact"></v-text-field>
                   <v-text-field v-model="editorDialog.emoji" label="Emoji" style="max-width: 100px;" density="compact"></v-text-field>
@@ -399,9 +409,79 @@ window.BuilderView = {
     const workflowObj = ref({});
     const saving = ref(false);
     const snackbar = reactive({ show: false, text: "", color: "success" });
+    const isReadonly = computed(() => {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get('readonly') === 'true' || window.location.hash.includes('readonly=true');
+    });
+    const threadId = computed(() => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const t = urlParams.get('thread_id');
+      if (t) return t;
+      const match = window.location.hash.match(/thread_id=([^&]+)/);
+      return match ? match[1] : null;
+    });
+
+    const activeAgents = ref([]);
+    const activeMilestones = ref([]);
+    
+    // Polling logic for active state
+    let pollTimer = null;
+    onMounted(() => {
+      if (isReadonly.value && threadId.value) {
+        pollTimer = setInterval(async () => {
+          try {
+            const r = await fetch("/api/active");
+            if (r.ok) {
+              const active = await r.json();
+              const threadActive = active.find(a => a.thread_id === threadId.value);
+              if (threadActive) {
+                 activeAgents.value = threadActive.agents || [];
+                 // active milestone can be derived from agents
+                 // A milestone is active if any agent inside it is active
+                 const activeMs = [];
+                 activeAgents.value.forEach(a => {
+                    // find node
+                    const n = nodes.value.find(node => node.type === 'agent' && node.id === 'agent_' + a);
+                    if (n) {
+                       // find which milestone contains this node
+                       const ms = milestoneBoxes.value.find(b => 
+                          n.x >= b.x && n.x <= b.x + b.width &&
+                          n.y >= b.y && n.y <= b.y + b.height
+                       );
+                       if (ms && !activeMs.includes(ms.id)) activeMs.push(ms.id);
+                    }
+                 });
+                 activeMilestones.value = activeMs;
+              } else {
+                 activeAgents.value = [];
+                 activeMilestones.value = [];
+              }
+            }
+          } catch(e) {}
+        }, 1000);
+      }
+    });
+    onUnmounted(() => {
+      if (pollTimer) clearInterval(pollTimer);
+    });
+
+    const isActiveMilestone = (id) => activeMilestones.value.includes(id);
+    const isActiveNode = (id) => {
+       if (id.startsWith('agent_')) {
+          const agentId = id.substring(6);
+          return activeAgents.value.includes(agentId);
+       }
+       return false;
+    };
+
 
     const currentWorkflow = ref("");
     const workflowDialog = reactive({ show: true, selected: null, newName: '', existing: [] });
+    const availableMilestones = computed(() => {
+        const ms = nodes.value.filter(n => n.nodeType === 'milestone').map(m => ({ title: m.label, value: m.id }));
+        ms.unshift({ title: 'Unassigned', value: '__unassigned__' });
+        return ms;
+    });
 
     const zoom = ref(1);
     const zoomIn = () => { zoom.value = Math.min(zoom.value + 0.01, 3); };
@@ -441,7 +521,7 @@ window.BuilderView = {
     const availableAgentIds = computed(() => Object.keys(workflowObj.value?.agents || {}));
     const dragState = reactive({ active: false, node: null, milestoneId: null, labelEdgeId: null, startX: 0, startY: 0, initialX: 0, initialY: 0, initialPositions: null });
 
-    const editorDialog = reactive({ show: false, node: null, agentId: '', role: '', emoji: '\u{1F916}', mission: '', routes: [], task: '', label: '', description: '' });
+    const editorDialog = reactive({ show: false, node: null, agentId: '', role: '', emoji: '\u{1F916}', mission: '', routes: [], task: '', label: '', description: '', milestoneId: '' });
 
     const drawingEdge = reactive({
         active: false,
@@ -1420,6 +1500,7 @@ window.BuilderView = {
     // ── Node editing ────────────────────────────────────────────────────────
     const editNode = (node) => {
       editorDialog.node = node;
+      editorDialog.milestoneId = node.milestoneId || '__unassigned__';
       editorDialog.agentId = node.agentId || '';
       editorDialog.routes = node.routes ? JSON.parse(JSON.stringify(node.routes)) : [];
       editorDialog.task = node.task || '';
@@ -1454,6 +1535,26 @@ window.BuilderView = {
     const closeEditor = () => {
       if (editorDialog.node) {
           const node = editorDialog.node;
+          let selectedMs = editorDialog.milestoneId;
+          
+          if (typeof selectedMs === 'object' && selectedMs !== null) {
+              // If user selected an existing item, it might be an object
+              selectedMs = selectedMs.value || selectedMs.title;
+          }
+
+          if (selectedMs && selectedMs !== '__unassigned__' && node.nodeType !== 'milestone') {
+              const existing = nodes.value.find(n => n.nodeType === 'milestone' && (n.id === selectedMs || n.label === selectedMs));
+              if (existing) {
+                  node.milestoneId = existing.id;
+              } else {
+                  const newId = 'vnode_' + Math.random().toString(36).substr(2, 9);
+                  nodes.value.push({ id: newId, nodeType: 'milestone', label: selectedMs, description: '', routes: [], x: node.x, y: Math.max(0, node.y - 100) });
+                  node.milestoneId = newId;
+              }
+          } else if (node.nodeType !== 'milestone') {
+              node.milestoneId = null;
+          }
+
           if (node.nodeType === 'user') {
               node.task = editorDialog.task;
               node.routes = editorDialog.routes;
@@ -1502,7 +1603,19 @@ window.BuilderView = {
         closeEditor();
     };
 
-    onMounted(() => {
+    onMounted(async () => {
+      if (threadId.value) {
+          try {
+              const res = await fetch(`/api/threads/${threadId.value}/workflow`);
+              if (res.ok) {
+                  const data = await res.json();
+                  currentWorkflow.value = data.workflow || "workflow";
+                  workflowDialog.show = false;
+                  await fetchWorkflow();
+                  return;
+              }
+          } catch(e) {}
+      }
       fetchWorkflowsList();
     });
 
@@ -1515,9 +1628,9 @@ window.BuilderView = {
       saveWorkflow, layoutNodes, milestoneBoxes, milestoneEdges,
       startDrag, startMilestoneDrag, startLabelDrag, labelOverrides, formatTarget: (t) => t,
       onPaletteDragStart, onCanvasDrop,
-      editorDialog, addRoute,
+      editorDialog, addRoute, availableMilestones,
       editNode, closeEditor, deleteVisualNode,
-      drawingEdge, drawingEdgePath, getCanvasCoords,
+      drawingEdge, drawingEdgePath, getCanvasCoords, isReadonly, isActiveMilestone, isActiveNode,
       startDrawingEdge, onCanvasMouseMove, onCanvasMouseUp
     };
   }

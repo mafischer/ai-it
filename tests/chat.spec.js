@@ -72,7 +72,7 @@ test.describe('Chat Main Page UI', () => {
     await page.getByText('New Chat').first().click();
 
     // Check empty state
-    await expect(page.getByText('Multi-agent software engineering').first()).toBeVisible();
+    await expect(page.locator('p.text-body-1.text-medium-emphasis.mb-6')).toContainText('Multi-agent software engineering anything');
     
     // Select workflow (workflows are now name strings: 'standard', 'research')
     await page.click('.v-select');

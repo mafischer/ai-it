@@ -134,6 +134,7 @@ Engine URLs in `workflow.json` accept an array for round-robin load balancing:
 ### Admin UI (Thread List & Detail)
 - **Thread List**: Displays active status, message counts, participating agents, and sticky control panel header. Child threads (spawned at milestones) are hidden from the list.
 - **Thread Chain**: The `?chain=true` query param on `/api/threads/:id/messages` returns messages across the full thread chain with boundary markers. Rewind, edit, clone, and rate operations resolve to the correct source thread via `resolveMsg()`.
+- **Workflow Visualizer**: A 'View Visualizer' button opens an iframe of the Workflow Builder in read-only mode, showing live execution progress across milestones and active agents.
 - **Rewind**: Restarts the workflow from a specific historical message. Detects prompt-rewinds to bypass regeneration. Chain-aware: navigates to the source thread if different.
 - **Edit & Restart**: Allows modifying a message's content (via a popup editor) before triggering a rewind.
 - **Expand/Collapse**: Support for individual message toggling (click bubble) and "Expand/Collapse All".
@@ -170,3 +171,4 @@ Engine URLs in `workflow.json` accept an array for round-robin load balancing:
 ## Unintegrated Agents
 
 `Site Reliability Engineer`, `DevOps Engineer`, and `Support Engineer` are defined in `workflow.json` with `"active": false`.
+and `Support Engineer` are defined in `workflow.json` with `"active": false`.

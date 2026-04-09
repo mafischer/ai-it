@@ -270,6 +270,9 @@ const ThreadDetail = {
             {{ messages.length }} messages
           </v-chip>
           <v-spacer></v-spacer>
+          <v-btn size="small" variant="tonal" prepend-icon="mdi-graph" class="mr-2" @click="visualizerOpen = true">
+            View Visualizer
+          </v-btn>
           <v-btn size="small" variant="tonal" :prepend-icon="allExpanded ? 'mdi-collapse-all' : 'mdi-expand-all'" @click="toggleAllMessages">
             {{ allExpanded ? 'Collapse All' : 'Expand All' }}
           </v-btn>
@@ -433,6 +436,17 @@ const ThreadDetail = {
           </v-card-actions>
         </v-card>
       </v-dialog>
+
+      <!-- Visualizer Dialog -->
+      <v-dialog v-model="visualizerOpen" fullscreen hide-overlay transition="dialog-bottom-transition">
+        <v-card style="background: #11111b; display: flex; flex-direction: column;">
+          <v-toolbar density="compact" color="surface-variant">
+            <v-btn icon="mdi-close" @click="visualizerOpen = false"></v-btn>
+            <v-toolbar-title>Workflow Visualizer</v-toolbar-title>
+          </v-toolbar>
+          <iframe v-if="visualizerOpen" :src="'/?readonly=true&thread_id=' + threadId + '#/builder'" style="width:100%; flex-grow: 1; border:none;"></iframe>
+        </v-card>
+      </v-dialog>
     </div>
   `,
   setup() {
@@ -446,6 +460,7 @@ const ThreadDetail = {
     const threadChain = ref([]);
     const workflowMilestones = ref([]);
     const editDialogOpen = ref(false);
+    const visualizerOpen = ref(false);
     const editContent = ref("");
     const editIndex = ref(-1);
     let poll;
@@ -611,46 +626,85 @@ const ThreadDetail = {
     let prevSectionCount = 0;
 
     const milestoneSections = computed(() => {
-      // First pass: split messages by boundaries, collecting boundary data
-      const rawSections = [];
-      const boundaries = [];
-      let current = { messages: [], active: false };
-      rawSections.push(current);
+      const milestones = workflowMilestones.value || [];
+      if (!milestones.length) {
+        const rawSections = [];
+        const boundaries = [];
+        let current = { messages: [], active: false };
+        rawSections.push(current);
+        for (const m of messages.value) {
+          if (m.type === "boundary") {
+            boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent, _threadId: m._threadId, _threadMsgIndex: m._threadMsgIndex });
+            current = { messages: [], active: false };
+            rawSections.push(current);
+          } else {
+            current.messages.push(m);
+          }
+        }
+        const sections = rawSections.map((s, i) => {
+          const thisNextBoundary = i < boundaries.length ? boundaries[i] : null;
+          const prevBoundary = i > 0 ? boundaries[i - 1] : null;
+          const agent = thisNextBoundary ? (thisNextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
+          const rewindTarget = prevBoundary && prevBoundary._threadMsgIndex != null ? { threadId: prevBoundary._threadId || threadId, msgIndex: prevBoundary._threadMsgIndex } : null;
+          return { ...s, label: deriveSectionLabel(s, thisNextBoundary), agent, rewindTarget };
+        });
+        const labelCounts = {};
+        sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
+        const labelCounters = {};
+        sections.forEach(s => {
+          if (labelCounts[s.label] > 1) {
+            labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
+            s.label = s.label + " (Round " + labelCounters[s.label] + ")";
+          }
+        });
+        if (sections.length && active.value) {
+          sections[sections.length - 1].active = true;
+        }
+        sections.forEach(s => {
+          if (s.messages.some(m => m._streaming)) s.active = true;
+        });
+        if (sections.length !== prevSectionCount) {
+          Object.keys(sectionOverrides).forEach(k => delete sectionOverrides[k]);
+          prevSectionCount = sections.length;
+        }
+        return sections;
+      }
+
+      const sectionsMap = new Map();
+      const sections = milestones.map(m => {
+        const s = { id: m.id, label: m.name, messages: [], active: false, agent: "", statuses: m.statuses || [], rewindTarget: null };
+        sectionsMap.set(m.id, s);
+        return s;
+      });
+
+      let currentMilestoneIndex = 0;
       for (const m of messages.value) {
         if (m.type === "boundary") {
-          boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent, _threadId: m._threadId, _threadMsgIndex: m._threadMsgIndex });
-          current = { messages: [], active: false };
-          rawSections.push(current);
+          const mIdx = milestones.findIndex(ms => ms.statuses && ms.statuses.includes(m.milestoneStatus));
+          if (mIdx !== -1) {
+            currentMilestoneIndex = mIdx;
+          }
+          if (mIdx !== -1 && mIdx + 1 < milestones.length) {
+            currentMilestoneIndex = mIdx + 1;
+            if (m._threadMsgIndex != null) {
+              sections[currentMilestoneIndex].rewindTarget = { threadId: m._threadId || threadId, msgIndex: m._threadMsgIndex };
+            }
+          }
         } else {
-          current.messages.push(m);
+          sections[currentMilestoneIndex].messages.push(m);
+          if (m.role === "assistant" && m.name) {
+            sections[currentMilestoneIndex].agent = m.name;
+          }
         }
       }
-      // Second pass: name each section
-      const sections = rawSections.map((s, i) => {
-        const thisNextBoundary = i < boundaries.length ? boundaries[i] : null;
-        const prevBoundary = i > 0 ? boundaries[i - 1] : null;
-        const agent = thisNextBoundary ? (thisNextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
-        // Sections after a milestone boundary get a rewind target to re-trigger all agents from the fan-out point
-        const rewindTarget = prevBoundary && prevBoundary._threadMsgIndex != null ? { threadId: prevBoundary._threadId || threadId, msgIndex: prevBoundary._threadMsgIndex } : null;
-        return { ...s, label: deriveSectionLabel(s, thisNextBoundary), agent, rewindTarget };
-      });
-      // Third pass: add round numbers for duplicate labels
-      const labelCounts = {};
-      sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
-      const labelCounters = {};
-      sections.forEach(s => {
-        if (labelCounts[s.label] > 1) {
-          labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
-          s.label = s.label + " (Round " + labelCounters[s.label] + ")";
-        }
-      });
-      // Mark last section as active if thread is active
-      if (sections.length && active.value) {
-        sections[sections.length - 1].active = true;
+
+      if (active.value) {
+        sections[currentMilestoneIndex].active = true;
       }
       sections.forEach(s => {
         if (s.messages.some(m => m._streaming)) s.active = true;
       });
+
       if (sections.length !== prevSectionCount) {
         Object.keys(sectionOverrides).forEach(k => delete sectionOverrides[k]);
         prevSectionCount = sections.length;
@@ -1052,7 +1106,7 @@ const ThreadDetail = {
       if (currentStreamController) currentStreamController.abort();
     });
 
-    return { threadId, threadTitle, threadChain, messages, loading, active, activeAgents, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, rewindSection, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage, milestoneSections, isSectionOpen, toggleSection, msgIndex };
+    return { threadId, threadTitle, threadChain, messages, loading, active, activeAgents, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, rewindSection, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, visualizerOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage, milestoneSections, isSectionOpen, toggleSection, msgIndex };
   }
 };
 

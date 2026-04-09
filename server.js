@@ -594,6 +594,20 @@ server.put("/api/workflow", async (request) => {
 });
 
 // ── Admin API ────────────────────────────────────────────────────────────────
+server.get("/api/threads/:threadId/workflow", async (request, reply) => {
+    const db = getCheckpointDB();
+    if (!db || !dbHasTable(db)) { db?.close(); return { workflow: "workflow" }; }
+    try {
+        db.exec("CREATE TABLE IF NOT EXISTS thread_workflows (thread_id TEXT PRIMARY KEY, workflow TEXT NOT NULL)");
+        const row = db.prepare("SELECT workflow FROM thread_workflows WHERE thread_id = ?").get(request.params.threadId);
+        db.close();
+        return { workflow: row ? row.workflow : "workflow" };
+    } catch {
+        db?.close();
+        return { workflow: "workflow" };
+    }
+});
+
 server.get("/api/threads", async () => {
     const db = getCheckpointDB();
     if (!db || !dbHasTable(db)) { db?.close(); return []; }

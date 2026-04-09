@@ -48,8 +48,8 @@
     "maxClarificationRounds": 5,
     "milestones": [
       {
-        "id": "initiation",
-        "name": "Project Initiation",
+        "id": "inception",
+        "name": "Project Inception",
         "statuses": [
           "DIRECTIVE_CLEAR",
           "DIRECTIVE_AMBIGUOUS"
@@ -66,7 +66,7 @@
           "REQUIREMENTS_DRAFTED",
           "REQUIREMENTS_APPROVED"
         ],
-        "previous": "initiation",
+        "previous": "inception",
         "next": "design"
       },
       {
