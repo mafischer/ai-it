@@ -11,8 +11,8 @@ ROUTING RULES (match status exactly):
 Any agent with status ending in "_PHASE_CONTINUE" -> route back to that same agent.
 
 business_analyst:
-  REQUIREMENTS_COMPLETE -> software_architect (and ux_designer runs in parallel, but return software_architect)
-  REQUIREMENTS_APPROVED -> backend_software_engineer or frontend_software_engineer
+  REQUIREMENTS_DRAFTED -> software_architect (and ux_designer runs in parallel, but return software_architect)
+  DESIGNS_APPROVED -> backend_software_engineer or frontend_software_engineer
   REQUIREMENTS_AMBIGUOUS -> software_architect
   DIRECTIVE_CLEAR -> business_analyst
   DIRECTIVE_AMBIGUOUS -> complete (wait for user)

@@ -34,7 +34,7 @@ Approval loops allow Quality Engineer to send work back upstream. The two parall
 ### Pipeline Milestones
 `workflow.json` now defines a `pipeline.milestones` array that structures the workflow into named phases:
 - **Project Initiation** — `DIRECTIVE_CLEAR`, `DIRECTIVE_AMBIGUOUS`
-- **Requirements Definition** — `REQUIREMENTS_CLEAR`, `REQUIREMENTS_AMBIGUOUS`, `REQUIREMENTS_DRAFTED`, `REQUIREMENTS_APPROVED`
+- **Requirements Definition** — `REQUIREMENTS_CLEAR`, `REQUIREMENTS_AMBIGUOUS`, `REQUIREMENTS_DRAFTED`
 - **System & UX Design** — `DESIGN_COMPLETE`, `DESIGN_APPROVED`, `DESIGN_SATISFIED`
 - **Implementation** — `IMPLEMENTATION_COMPLETE`, `IMPLEMENTATION_APPROVED`, `IMPLEMENTATION_CLEAR`, `IMPLEMENTATION_AMBIGUOUS`
 - **Quality Assurance** — `TESTING_COMPLETE`, `TESTING_CLEAR`, `TESTING_AMBIGUOUS`, `TESTS_PASSED`, `REJECTED`
@@ -43,7 +43,7 @@ Each milestone has `previous`/`next` links forming a doubly-linked list. Milesto
 
 ### Thread Spawning (Milestone-Based Context Reset)
 At key milestone boundaries, the server ends the current LangGraph thread and spawns a new one, resetting the context window while preserving lineage:
-- **Spawn milestones**: `REQUIREMENTS_DRAFTED`, `REQUIREMENTS_APPROVED`, `DESIGN_APPROVED`, `IMPLEMENTATION_APPROVED`
+- **Spawn milestones**: `REQUIREMENTS_DRAFTED`, `DESIGNS_APPROVED`, `DESIGN_APPROVED`, `IMPLEMENTATION_APPROVED`
 - The new thread is seeded with the original directive + milestone output, then routing continues forward.
 - Parent-child links are stored in a `thread_links` SQLite table. `getRootThread()` walks up; `getThreadChain()` walks down.
 - The thread list API filters out child threads (they appear as part of their parent chain, not standalone).

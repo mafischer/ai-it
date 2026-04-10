@@ -4,6 +4,19 @@ const { useTheme } = Vuetify;
 
 window.BuilderView = {
   template: `
+    <style>
+    @keyframes dash {
+      to { stroke-dashoffset: -20; }
+    }
+    .active-edge {
+      stroke-dasharray: 5, 5;
+      animation: dash 1s linear infinite;
+    }
+    .active-node {
+      box-shadow: 0 0 15px 2px rgba(76, 175, 80, 0.4) !important;
+      border-color: #4caf50 !important;
+    }
+    </style>
     <v-layout class="fill-height">
       <v-app-bar v-if="!isReadonly" color="surface" border="b" density="compact">
         <v-btn icon="mdi-arrow-left" @click="$router.push('/')"></v-btn>
@@ -101,6 +114,7 @@ window.BuilderView = {
               <!-- Milestone Bounding Boxes (draggable) -->
               <div v-for="box in milestoneBoxes" :key="'mb-'+box.id"
                    class="position-absolute rounded"
+                   :class="{ 'active-milestone': isActiveMilestone(box.id) }"
                    :style="{ left: box.x + 'px', top: box.y + 'px', width: box.width + 'px', height: box.height + 'px', border: isActiveMilestone(box.id) ? '2px dashed #4caf50' : '2px dashed rgba(88, 166, 255, 0.3)', zIndex: 5, cursor: isReadonly ? 'default' : 'grab' }"
                    @mousedown.stop="!isReadonly ? startMilestoneDrag(box.id, $event) : null">
                 <div class="position-absolute" style="top: -20px; left: 10px; font-size: 11px; font-weight: bold; text-transform: uppercase;" :style="{ color: isActiveMilestone(box.id) ? '#4caf50' : 'rgba(88, 166, 255, 0.7)' }">
@@ -136,7 +150,7 @@ window.BuilderView = {
                 </g>
 
                 <g v-for="(edge, i) in edges" :key="'edge-'+i">
-                  <path :d="edge.path" fill="none" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowhead)" opacity="0.6"/>
+                  <path :d="edge.path" fill="none" :stroke="isActiveNode(edge.sourceNodeId) ? '#4caf50' : '#58a6ff'" stroke-width="2" :marker-end="isActiveNode(edge.sourceNodeId) ? 'url(#arrowhead-active)' : 'url(#arrowhead)'" opacity="0.6" :class="{ 'active-edge': isActiveNode(edge.sourceNodeId) }"/>
                 </g>
                 <!-- Drawing Edge -->
                 <path v-if="drawingEdge.active" :d="drawingEdgePath" fill="none" stroke="#58a6ff" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrowhead)" opacity="0.8"/>
@@ -145,6 +159,7 @@ window.BuilderView = {
               <!-- HTML Nodes -->
               <div v-for="node in nodes" :key="node.id"
                    class="position-absolute rounded"
+                   :class="{ 'active-node': isActiveNode(node.id) }"
                    :style="{ left: node.x + 'px', top: node.y + 'px', width: nodeWidth + 'px', zIndex: 10, cursor: 'move', userSelect: 'none',
                      background: '#1e1e2e',
                      border: node.nodeType === 'milestone' ? '2px dashed rgba(88, 166, 255, 0.6)' : node.nodeType === 'user' ? '1px solid #26a69a' : node.nodeType === 'system' ? '1px solid #7e57c2' : '1px solid #313244',
@@ -441,14 +456,9 @@ window.BuilderView = {
                  const activeMs = [];
                  activeAgents.value.forEach(a => {
                     // find node
-                    const n = nodes.value.find(node => node.type === 'agent' && node.id === 'agent_' + a);
-                    if (n) {
-                       // find which milestone contains this node
-                       const ms = milestoneBoxes.value.find(b => 
-                          n.x >= b.x && n.x <= b.x + b.width &&
-                          n.y >= b.y && n.y <= b.y + b.height
-                       );
-                       if (ms && !activeMs.includes(ms.id)) activeMs.push(ms.id);
+                    const n = nodes.value.find(node => node.agentId === a);
+                    if (n && n.milestoneId) {
+                       if (!activeMs.includes(n.milestoneId)) activeMs.push(n.milestoneId);
                     }
                  });
                  activeMilestones.value = activeMs;
@@ -467,11 +477,8 @@ window.BuilderView = {
 
     const isActiveMilestone = (id) => activeMilestones.value.includes(id);
     const isActiveNode = (id) => {
-       if (id.startsWith('agent_')) {
-          const agentId = id.substring(6);
-          return activeAgents.value.includes(agentId);
-       }
-       return false;
+       const node = nodes.value.find(n => n.id === id);
+       return node && node.agentId && activeAgents.value.includes(node.agentId);
     };
 
 

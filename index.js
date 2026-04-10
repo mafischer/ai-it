@@ -147,14 +147,9 @@ async function executeToolCall(call, ctx, nodeConfig) {
             console.error(`[TOOL] generate_image_mockup called for "${call.args.screen_name || 'UI'}"`);
             emit({ type: "image_gen", status: "starting", screen: call.args.screen_name, prompt: call.args.prompt.slice(0, 100) });
 
-            // Heartbeat every 30s to keep the stale guard from killing long image generations
-            const heartbeat = setInterval(() => {
-                emit({ type: "image_gen", status: "generating", screen: call.args.screen_name });
-            }, 30000);
-
             try {
-                const { generateMockup } = await import("./tools/comfyui/tools.js");
-                const result = await generateMockup(
+                const { startAsyncMockup } = await import("./tools/comfyui/tools.js");
+                const result = startAsyncMockup(
                     call.args.prompt,
                     call.args.aspect_ratio || "9:16",
                     call.args.screen_name || "UI Mockup"
@@ -163,9 +158,10 @@ async function executeToolCall(call, ctx, nodeConfig) {
                 emit({ type: "image_gen", status: "complete", screen: result.screenName, url: result.url });
                 if (span) span.end({ output: { url: result.url, dimensions: `${result.width}x${result.height}` } });
 
-                return `✅ Image generated:\n**Screen**: ${result.screenName}\n**Dimensions**: ${result.width}x${result.height}\n**URL**: ${result.url}\n\nMarkdown: ![${result.screenName}](${result.url})`;
-            } finally {
-                clearInterval(heartbeat);
+                return `✅ Image generation started in the background.\n**Screen**: ${result.screenName}\n**Dimensions**: ${result.width}x${result.height}\n**URL**: ${result.url}\n\nMarkdown: ![${result.screenName}](${result.url})`;
+            } catch (err) {
+                console.error(`[TOOL ERROR] ${err.message}`);
+                throw err;
             }
         }
     } catch (err) {
@@ -373,7 +369,6 @@ function extractAgentStatuses(content) {
 // Milestones that trigger spawning a new thread — context resets at these boundaries
 const THREAD_SPAWN_MILESTONES = [
     "REQUIREMENTS_DRAFTED",    // BA done → fan out to SA + UX
-    "REQUIREMENTS_APPROVED",   // BA approved → fan out to BE + FE
     "DESIGNS_APPROVED",        // BA approved both designs (per-agent) → fan out to BE + FE
     "DESIGN_APPROVED",         // SA/UX approved → fan out to BE + FE
     "IMPLEMENTATION_APPROVED"  // BE/FE approved → go to QE
@@ -406,7 +401,7 @@ function getPromptForNode(state, nodeName) {
     // the effectiveDirective, losing the actual requirements/design document.
     const MILESTONE_STATUSES = [
         "REQUIREMENTS_DRAFTED", "TESTING_COMPLETE",
-        "REQUIREMENTS_APPROVED", "DESIGNS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
+        "DESIGNS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
     ];
     const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt"));
     
@@ -649,7 +644,7 @@ async function agentNode(nodeName, state, nodeConfig) {
     // Identify the latest milestone for context isolation (same logic as getPromptForNode)
     const MILESTONE_STATUSES = [
         "REQUIREMENTS_DRAFTED", "TESTING_COMPLETE",
-        "REQUIREMENTS_APPROVED", "DESIGNS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
+        "DESIGNS_APPROVED", "DESIGN_APPROVED", "IMPLEMENTATION_APPROVED", "TESTS_PASSED"
     ];
     const allMsgsRaw = state.messages.filter(m => !getMsgName(m).endsWith("__prompt"));
     let milestoneIndex = -1;

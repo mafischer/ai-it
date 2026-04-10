@@ -593,6 +593,35 @@ server.put("/api/workflow", async (request) => {
     return { success: true };
 });
 
+// ── Mockups API Proxy ────────────────────────────────────────────────────────
+server.get("/api/mockups/:filename", async (request, reply) => {
+    const { filename } = request.params;
+    const minioUrl = `http://10.3.0.241:9100/ai-it-mockups/${filename}`;
+    try {
+        const response = await fetch(minioUrl);
+        if (response.ok) {
+            const buffer = await response.arrayBuffer();
+            return reply
+                .header('Content-Type', 'image/png')
+                .header('Cache-Control', 'public, max-age=31536000') // Cache forever once generated
+                .send(Buffer.from(buffer));
+        }
+    } catch (e) {
+        console.error(`[MOCKUP PROXY] Error proxying ${filename}: ${e.message}`);
+    }
+
+    // Fallback: MinIO returned 404 or connection failed, serve generating placeholder
+    const placeholderPath = path.join(__dirname, "public", "assets", "generating-placeholder.svg");
+    if (existsSync(placeholderPath)) {
+        return reply
+            .header('Content-Type', 'image/svg+xml')
+            .header('Cache-Control', 'no-store, max-age=0') // Don't cache placeholder
+            .send(readFileSync(placeholderPath));
+    }
+    
+    return reply.code(404).send({ error: "Not found" });
+});
+
 // ── Admin API ────────────────────────────────────────────────────────────────
 server.get("/api/threads/:threadId/workflow", async (request, reply) => {
     const db = getCheckpointDB();

@@ -150,7 +150,7 @@ async function uploadToMinIO(buffer, filename) {
 }
 
 // Main generation function - awaits full pipeline (submit, poll, download, upload)
-async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Unknown") {
+async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Unknown", providedFilename = null) {
   console.error(`[COMFYUI] Generating mockup: "${screenName}"`);
 
   // Parse prompt text (strips --ar from text) and get base dimensions
@@ -167,7 +167,7 @@ async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Un
 
   // Create predictable filename for MinIO
   const safeName = screenName.replace(/[^a-zA-Z0-9]/g, "_");
-  const resultFilename = `${safeName}_${Date.now()}.png`;
+  const resultFilename = providedFilename || `${safeName}_${Date.now()}.png`;
 
   // Build workflow
   const workflow = buildWorkflow(prompt, width, height);
@@ -197,7 +197,30 @@ async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Un
   };
 }
 
-export { generateMockup, parseFluxPrompt, buildWorkflow, submitToComfyUI, waitForCompletion };
+// Starts generation in the background and returns the proxy URL immediately
+function startAsyncMockup(promptText, aspectRatio = "9:16", screenName = "Unknown") {
+  let { prompt, width, height } = parseFluxPrompt(promptText);
+
+  if (!(promptText || "").match(/--ar\s+\d+:\d+/) && aspectRatio) {
+    const arParts = aspectRatio.match(/^(\d+):(\d+)$/);
+    if (arParts) {
+      ({ width, height } = aspectToDimensions(parseInt(arParts[1]), parseInt(arParts[2])));
+    }
+  }
+
+  const safeName = screenName.replace(/[^a-zA-Z0-9]/g, "_");
+  const resultFilename = `${safeName}_${Date.now()}.png`;
+  const proxyUrl = `/api/mockups/${resultFilename}`;
+
+  // Fire and forget
+  generateMockup(promptText, aspectRatio, screenName, resultFilename).catch(err => {
+      console.error(`[COMFYUI] Async generation failed: ${err.message}`);
+  });
+
+  return { url: proxyUrl, width, height, screenName: safeName };
+}
+
+export { generateMockup, startAsyncMockup, parseFluxPrompt, buildWorkflow, submitToComfyUI, waitForCompletion };
 
 /**
  * Register ComfyUI tools on an McpServer instance.
@@ -213,16 +236,38 @@ export function registerTools(server) {
     },
     async ({ prompt, aspect_ratio, screen_name }) => {
       try {
-        const result = await generateMockup(prompt, aspect_ratio, screen_name);
+        let { width, height } = parseFluxPrompt(prompt);
+        if (!(prompt || "").match(/--ar\s+\d+:\d+/) && aspect_ratio) {
+          const arParts = aspect_ratio.match(/^(\d+):(\d+)$/);
+          if (arParts) {
+            // Re-calculate since aspectToDimensions is not exported, we can just let it be approximate or just run the parse
+            const aspectWidth = parseInt(arParts[1]);
+            const aspectHeight = parseInt(arParts[2]);
+            const TOTAL_PIXELS = 1024 * 1024;
+            const aspect = aspectWidth / aspectHeight;
+            height = Math.floor(Math.sqrt(TOTAL_PIXELS / aspect) / 16) * 16;
+            width = Math.floor((height * aspect) / 16) * 16;
+          }
+        }
+        
+        const safeName = screen_name.replace(/[^a-zA-Z0-9]/g, "_");
+        const resultFilename = `${safeName}_${Date.now()}.png`;
+        const proxyUrl = `/api/mockups/${resultFilename}`;
+
+        // Fire and forget
+        generateMockup(prompt, aspect_ratio, screen_name, resultFilename).catch(err => {
+            console.error(`[COMFYUI] Async generation failed: ${err.message}`);
+        });
+
         return {
           content: [{
             type: "text",
-            text: `Image generated.\n**Screen:** ${result.screenName}\n**Dimensions:** ${result.width}x${result.height}\n**URL:** ${result.url}\n\nMarkdown: ![${result.screenName}](${result.url})`
+            text: `Image generation started in the background.\n**Screen:** ${screen_name}\n**Dimensions:** ${width}x${height}\n**URL:** ${proxyUrl}\n\nMarkdown: ![${screen_name}](${proxyUrl})`
           }]
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `Image generation failed: ${err.message}` }],
+          content: [{ type: "text", text: `Image generation failed to start: ${err.message}` }],
           isError: true
         };
       }

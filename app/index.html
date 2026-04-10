@@ -31,16 +31,7 @@ const EMOJIS = {
 
 function agentName(id) {
   if (typeof id !== 'string') id = String(id || "");
-  let name = id.replace(/_research_phase_2_\d+$/, "").replace(/_research_phase_2$/, "").replace(/_research$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-  if (id?.match(/_research_phase_2_(\d+)$/)) {
-    const num = id.match(/_research_phase_2_(\d+)$/)[1];
-    return `${name} Research Phase 2 - Link ${num}`;
-  }
-  if (id?.endsWith("_research_phase_2")) return `${name} Research Phase 2`;
-  if (id?.endsWith("_research")) return `${name} Research Phase 1`;
-  const toolEligible = ["business_analyst", "software_architect", "ux_designer"];
-  if (toolEligible.includes(id)) return `${name} Drafting`;
-  return name;
+  return id.replace(/_research_round_\d+$/, "").replace(/_research_phase_2_\d+$/, "").replace(/_research_phase_2$/, "").replace(/_research$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function statusColor(status) {
