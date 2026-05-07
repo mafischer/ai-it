@@ -33,7 +33,12 @@ After describing each screen, **call the `generate_image_mockup` tool** to gener
 
 **IMPORTANT**: After calling the tool, include the returned URL in your design document as a markdown image: `![Processing mockup for Screen Name...](URL)`. The alt text serves as a graceful fallback while the image loads or if it is unavailable.
 
-Write prompts that are specific and detailed enough to generate an accurate representation of your design. Include concrete details about colors, element placement, visual hierarchy, and overall aesthetic.
+**Flux Prompting Best Practices (Industry Standard):**
+Write prompts that are specific and detailed enough to generate an accurate representation of your design, utilizing Flux's natural language understanding capabilities.
+- **Use Natural Language:** Describe the UI as if talking to a human designer. Avoid keyword salads like "UI, app, high quality, 4k, masterpiece". Instead use "A modern, high-fidelity mobile app UI mockup for a food delivery service, featuring a clean white background with vibrant orange accents."
+- **Structure Your Prompt:** Start with the medium (e.g., "A UI design mockup of..."), followed by the layout/structure, specific UI elements (buttons, cards), typography styles, and color palette.
+- **Accurate Typography:** Flux excels at rendering text. Always enclose literal text in double quotes and specify its style and placement (e.g., `A prominent header reading "Order Now" in a bold sans-serif font`).
+- **Avoid Negatives:** Flux does not process negative prompts well. Focus on describing exactly what you *do* want to see rather than what to omit.
 
 ## Rules
 - **NEVER** output ASCII art, box-drawing characters, Unicode diagrams, or any visual representation using text characters.
@@ -42,7 +47,7 @@ Write prompts that are specific and detailed enough to generate an accurate repr
 - If you catch yourself starting to draw something with text characters, stop immediately and describe it in words instead.
 
 ## Exit
-When the design is done, you MUST end with: "STATUS: DESIGN_COMPLETE".
+When the design is done, you MUST end with: "STATUS: DESIGN_DRAFTED".
 
 {{#hasClarifications}}
 ## Clarification History

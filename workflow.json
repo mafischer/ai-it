@@ -19,7 +19,7 @@
     },
     "olmx": {
       "url": [
-        "http://10.1.0.202:8001/v1"
+        "http://10.3.0.239:8001/v1"
       ],
       "apiKey": "${OMLX_KEY}",
       "capabilities": [
@@ -61,9 +61,9 @@
         "id": "requirements",
         "name": "Requirements Definition",
         "statuses": [
+          "REQUIREMENTS_DRAFTED",
           "REQUIREMENTS_CLEAR",
-          "REQUIREMENTS_AMBIGUOUS",
-          "REQUIREMENTS_DRAFTED"
+          "REQUIREMENTS_AMBIGUOUS"
         ],
         "previous": "inception",
         "next": "design"
@@ -72,10 +72,10 @@
         "id": "design",
         "name": "System & UX Design",
         "statuses": [
-          "DESIGN_COMPLETE",
+          "DESIGN_DRAFTED",
+          "DESIGN_AMBIGUOUS",
           "DESIGNS_APPROVED",
-          "DESIGN_APPROVED",
-          "DESIGN_SATISFIED"
+          "DESIGN_APPROVED"
         ],
         "previous": "requirements",
         "next": "implementation"
@@ -97,10 +97,10 @@
         "name": "Quality Assurance",
         "statuses": [
           "TESTING_COMPLETE",
-          "TESTING_CLEAR",
-          "TESTING_AMBIGUOUS",
           "TESTS_PASSED",
-          "REJECTED"
+          "REJECTED",
+          "TESTING_CLEAR",
+          "TESTING_AMBIGUOUS"
         ],
         "previous": "implementation",
         "next": null
@@ -271,29 +271,31 @@
         "QUESTION": "__end__"
       },
       "approval_triggers": [
-        "DESIGN_COMPLETE"
+        "DESIGN_DRAFTED"
       ],
       "fallback": "router"
     },
     "software_architect": {
       "routes": {
-        "DESIGN_COMPLETE": "business_analyst",
-        "DESIGN_SATISFIED": "backend_software_engineer",
+        "DESIGN_DRAFTED": "business_analyst",
+        "IMPLEMENTATION_AMBIGUOUS": "backend_software_engineer",
         "DESIGN_APPROVED": "backend_software_engineer",
+        "IMPLEMENTATION_APPROVED": "quality_engineer",
         "QUESTION": "business_analyst",
         "REQUIREMENTS_CLEAR": "software_architect",
         "REQUIREMENTS_AMBIGUOUS": "business_analyst"
       },
       "approval_triggers": [
-        "IMPLEMENTATION_COMPLETE"
+        "DESIGN_DRAFTED"
       ],
       "fallback": "router"
     },
     "ux_designer": {
       "routes": {
-        "DESIGN_COMPLETE": "business_analyst",
+        "DESIGN_DRAFTED": "business_analyst",
         "DESIGN_APPROVED": "frontend_software_engineer",
-        "DESIGN_SATISFIED": "frontend_software_engineer",
+        "IMPLEMENTATION_AMBIGUOUS": "frontend_software_engineer",
+        "IMPLEMENTATION_APPROVED": "quality_engineer",
         "QUESTION": "business_analyst",
         "REQUIREMENTS_CLEAR": "ux_designer",
         "REQUIREMENTS_AMBIGUOUS": "business_analyst"

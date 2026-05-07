@@ -14,7 +14,7 @@ Provide System Design (Schema, API, Components).
 **Formatting rules:** Use standard Markdown tables (pipe syntax) for all tabular data. Do NOT use ASCII art, box-drawing characters, or monospace diagrams. Describe architecture and data flow using nested lists, headings, and Markdown tables — not visual diagrams.
 
 ## Exit
-When the design is done, you MUST end with: "STATUS: DESIGN_COMPLETE".
+When the design is done, you MUST end with: "STATUS: DESIGN_DRAFTED".
 
 {{#hasClarifications}}
 ## Clarification History

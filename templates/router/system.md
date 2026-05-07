@@ -19,17 +19,19 @@ business_analyst:
   QUESTION -> complete (wait for user)
 
 software_architect:
-  DESIGN_COMPLETE -> business_analyst (for approval)
+  DESIGN_DRAFTED -> business_analyst (for approval)
   DESIGN_APPROVED -> backend_software_engineer
-  DESIGN_SATISFIED -> backend_software_engineer
   DESIGN_CLARIFIED -> software_architect
+  IMPLEMENTATION_AMBIGUOUS -> backend_software_engineer
+  IMPLEMENTATION_APPROVED -> quality_engineer
   QUESTION -> business_analyst
 
 ux_designer:
-  DESIGN_COMPLETE -> business_analyst (for approval)
+  DESIGN_DRAFTED -> business_analyst (for approval)
   DESIGN_APPROVED -> frontend_software_engineer
-  DESIGN_SATISFIED -> frontend_software_engineer
   DESIGN_CLARIFIED -> ux_designer
+  IMPLEMENTATION_AMBIGUOUS -> frontend_software_engineer
+  IMPLEMENTATION_APPROVED -> quality_engineer
   QUESTION -> business_analyst
 
 backend_software_engineer:

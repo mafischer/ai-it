@@ -1,4 +1,5 @@
 import "dotenv/config";
+import "./instrumentation.js";
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
@@ -12,10 +13,15 @@ import path from "path";
 import { HumanMessage, AIMessage, SystemMessage } from "@langchain/core/messages";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { CallbackHandler } from "langfuse-langchain";
-import { Langfuse } from "langfuse";
+import { CallbackHandler } from "@langfuse/langchain";
+import { LangfuseClient } from "@langfuse/client";
 
-// Import app last to ensure process.env is set before index.js initializes Langfuse
+// Shared Langfuse client for scores and API operations
+const langfuseClient = (process.env.LANGFUSE_SECRET_KEY || process.env.LANGFUSE_PUBLIC_KEY)
+    ? new LangfuseClient({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST })
+    : null;
+
+// Import app last to ensure process.env is set before index.js initializes
 import { app, routerLLM as utilityLLM, initConfig, researchEvents, THREAD_SPAWN_MILESTONES, extractStatus as extractStatusFromContent, extractAgentStatuses } from "./index.js";
 import { getAgentEmojis, getAgentMissions, getActiveAgents, getConfig, getPipeline } from "./src/config/loader.js";
 import { registerTools as registerWebSearch } from "./tools/web-search/tools.js";
@@ -209,9 +215,8 @@ server.post("/v1/chat/completions", async (request, reply) => {
         config.callbacks = [new CallbackHandler({
             sessionId: threadId,
             userId: "user",
-            publicKey: process.env.LANGFUSE_PUBLIC_KEY,
-            secretKey: process.env.LANGFUSE_SECRET_KEY,
-            baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST
+            tags: ["ai-it", "chat"],
+            traceMetadata: { thread_id: threadId, directive: originalDirective }
         })];
     }
 
@@ -238,7 +243,8 @@ server.post("/v1/chat/completions", async (request, reply) => {
 
         let lastTokenTime = Date.now();
         const activeAgentSet = new Set(), agentStats = {};
-        const syncActiveAgent = () => { activeThreadAgents[threadId] = { agents: [...activeAgentSet] }; };
+        let currentThreadId = threadId;
+        const syncActiveAgent = () => { activeThreadAgents[currentThreadId] = { agents: [...activeAgentSet] }; };
 
         const emit = (data) => { 
             lastTokenTime = Date.now();
@@ -261,30 +267,30 @@ server.post("/v1/chat/completions", async (request, reply) => {
             }
         };
         researchEvents.on("tool", onResearchEvent);
-
         researchEvents.on("prompt", onResearchPrompt);
         researchEvents.on("chunk", onResearchChunk);
         researchEvents.on("stop", onResearchStop);
 
-        const staleGuard = setInterval(() => { 
-            if (Date.now() - lastTokenTime > 600000) { 
-                const activeJobs = Object.entries(agentStats).map(([name, stats]) => {
-                    const duration = ((Date.now() - stats.startTime) / 1000).toFixed(1);
-                    return `${name} (${duration}s, ${stats.tokenCount} tokens)`;
-                }).join(", ");
-                console.error(`[STALE] Aborting thread ${threadId}. Active jobs: ${activeJobs || "none"}. Last token: ${((Date.now() - lastTokenTime)/1000).toFixed(1)}s ago`);
+        // Extended timeout for rewinds: 30 minutes to handle checkpoint restoration + LLM warmup
+        const REWIND_STALE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+        let staleGuard = setInterval(() => { 
+            if (Date.now() - lastTokenTime > REWIND_STALE_TIMEOUT) { 
+                console.error(`[STALE] Aborting thread ${threadId} (no tokens for 30m)`);
                 abortController.abort(); 
-                clearInterval(staleGuard); 
+                staleGuard = clearInterval(staleGuard); 
             } 
-        }, 10000);
+        }, 30000); // Check every 30s instead of 10s to reduce noise
 
-        // Stream processing loop — runs the graph and checks for spawn milestones after each run
+        // Reuse the same stream processing pattern as the main handler, with spawn support
         async function runStreamLoop(currentThreadId, initialMessages, streamConfig) {
-            console.error(`[STREAM] Starting workflow for thread ${currentThreadId}`);
-            const eventStream = await app.streamEvents({ messages: initialMessages }, { ...streamConfig, version: "v2", signal: abortController.signal });
-            const researchPromptSent = new Set();
+            console.error(`[START] Starting workflow for thread ${currentThreadId} passing ${initialMessages.length} messages (threadId=${threadId})`);
+            const eventStream = await app.streamEvents(
+                { messages: initialMessages },
+                { ...streamConfig, version: "v2", signal: abortController.signal }
+            );
             const agentContentBuffers = {};
             const agentRoundCounters = {};
+            const researchPromptSent = new Set();
             let lastAgentName = null, lastAgentContent = null;
 
             for await (const event of eventStream) {
@@ -296,8 +302,6 @@ server.post("/v1/chat/completions", async (request, reply) => {
 
                 const actualNodeName = event.metadata?.langgraph_node || "";
                 const isPromptNode = actualNodeName.endsWith("_prompt") && validAgents.includes(actualNodeName.replace(/_prompt$/, ""));
-
-                console.error(`[STREAM EVENT] type=${eventType} name=${event.name} nodeName=${nodeName} actual=${actualNodeName} prompt=${isPromptNode}`);
 
                 if (isPromptNode) continue;
 
@@ -315,11 +319,10 @@ server.post("/v1/chat/completions", async (request, reply) => {
                     let prompt = "Processing...";
                     if (inputMsgs.length > 0) { const fm = Array.isArray(inputMsgs[0]) ? inputMsgs[0][0] : inputMsgs[0]; prompt = fm.kwargs?.content || fm.content || prompt; }
                     agentStats[actualNodeName] = { startTime: Date.now(), tokenCount: 0, promptChars: prompt.length };
-                    process.stderr.write(`[STATS] ${actualNodeName} prompt: ${prompt.length.toLocaleString()} chars\n`);
 
                     if (!researchPromptSent.has(actualNodeName)) {
                         researchPromptSent.add(actualNodeName);
-                        emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: prompt, agent: resolvedAgentName }, finish_reason: null }] });
+                        emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org", choices: [{ index: 0, delta: { content: "", system_prompt: prompt, agent: resolvedAgentName }, finish_reason: null }] });
                     }
                 }
                 if (eventType === "on_chat_model_stream") {
@@ -339,7 +342,6 @@ server.post("/v1/chat/completions", async (request, reply) => {
                     const agentName = resolvedAgentName;
                     const stats = agentStats[agentName];
                     if (stats) { const el = ((Date.now() - stats.startTime) / 1000).toFixed(1); process.stderr.write(`[STATS] ${agentName} done: ${stats.tokenCount} tokens in ${el}s (${(stats.tokenCount / (parseFloat(el) || 1)).toFixed(1)} t/s)\n`); delete agentStats[agentName]; }
-                    // Agent scoring: extract STATUS and send Langfuse scores
                     if (agentContentBuffers[agentName]) {
                         const statusMatch = agentContentBuffers[agentName].match(/STATUS:\s*(\w+)/);
                         if (statusMatch) {
@@ -349,11 +351,11 @@ server.post("/v1/chat/completions", async (request, reply) => {
                                 const scoreValue = scoreMap[status] ?? 0.5;
                                 try {
                                     const lfHandler = streamConfig.callbacks?.find(c => c instanceof CallbackHandler);
-                                    const traceId = lfHandler?.traceId;
-                                    const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
-                                    lf.score({ traceId, name: "qe_approval", value: scoreValue, comment: `STATUS: ${status}`, metadata: { agent: "quality_engineer", status } });
-                                    await lf.flushAsync();
-                                    console.error(`[LANGFUSE] QE score: ${status} = ${scoreValue} for thread ${currentThreadId}`);
+                                    const traceId = lfHandler?.last_trace_id;
+                                    if (langfuseClient && traceId) {
+                                        langfuseClient.score.create({ traceId, name: "qe_approval", value: scoreValue, comment: `STATUS: ${status}`, metadata: { agent: "quality_engineer", status } });
+                                        await langfuseClient.flush();
+                                    }
                                 } catch (e) { console.error("[LANGFUSE] QE score error:", e.message); }
                             }
                             // Track clarification rounds for all agents
@@ -365,15 +367,15 @@ server.post("/v1/chat/completions", async (request, reply) => {
                                 const rounds = agentRoundCounters[agentName] || 0;
                                 try {
                                     const lfHandler = streamConfig.callbacks?.find(c => c instanceof CallbackHandler);
-                                    const traceId = lfHandler?.traceId;
-                                    const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
-                                    lf.score({ traceId, name: "clarification_rounds", value: rounds, comment: rounds === 0 ? "No clarification needed" : `${rounds} round(s) before ${status}`, metadata: { agent: agentName, finalStatus: status } });
-                                    await lf.flushAsync();
+                                    const traceId = lfHandler?.last_trace_id;
+                                    if (langfuseClient && traceId) {
+                                        langfuseClient.score.create({ traceId, name: "clarification_rounds", value: rounds, comment: rounds === 0 ? "No clarification needed" : `${rounds} round(s) before ${status}`, metadata: { agent: agentName, finalStatus: status } });
+                                        await langfuseClient.flush();
+                                    }
                                     console.error(`[LANGFUSE] ${agentName} clarification_rounds: ${rounds} for thread ${currentThreadId}`);
                                 } catch (e) { console.error("[LANGFUSE] clarification score error:", e.message); }
                             }
                         }
-                        // Track last agent output for spawn detection
                         lastAgentName = agentName;
                         lastAgentContent = agentContentBuffers[agentName];
                     }
@@ -382,17 +384,12 @@ server.post("/v1/chat/completions", async (request, reply) => {
                     activeAgentSet.delete(agentName);
                     syncActiveAgent();
                     if (threadPauseRequested[currentThreadId] && activeAgentSet.size === 0) {
-                        const activeJobs = Object.entries(agentStats).map(([name, stats]) => {
-                            const duration = ((Date.now() - stats.startTime) / 1000).toFixed(1);
-                            return `${name} (${duration}s, ${stats.tokenCount} tokens)`;
-                        }).join(", ");
-                        console.error(`[PAUSE] All agents drained for thread ${currentThreadId}, pausing workflow. Active jobs: ${activeJobs || "none"}`);
                         abortController.abort();
                     }
                 }
             }
 
-            // Check if the last agent output was a spawn milestone
+            // Check for spawn milestone
             if (lastAgentContent) {
                 let lastStatus = extractStatusFromContent(lastAgentContent);
                 // Fallback: check for per-agent approvals (BA approval with SA_STATUS/UX_STATUS)
@@ -410,15 +407,9 @@ server.post("/v1/chat/completions", async (request, reply) => {
         }
 
         (async () => {
-            let currentThreadId = threadId;
-            const rootThreadId = threadId; // For Langfuse session continuity
+            const rootThreadId = threadId;
             try {
-                // Initial run
-                let result = await runStreamLoop(
-                    currentThreadId,
-                    [new HumanMessage({ content: lastUserMessage, additional_kwargs: { timestamp: Date.now() } })],
-                    config
-                );
+                let result = await runStreamLoop(currentThreadId, cleanedMessages, config);
 
                 // Spawn loop: keep spawning new threads at milestone boundaries
                 while (result.spawn) {
@@ -429,7 +420,7 @@ server.post("/v1/chat/completions", async (request, reply) => {
                     const seedMessages = [
                         new HumanMessage({ content: originalDirective, additional_kwargs: { timestamp: Date.now() } })
                     ];
-                    // For per-agent approvals, include the individual design outputs as context
+                    // Include the milestone output(s) as context for the new thread
                     try {
                         const checkpointState = await app.getState({ configurable: { thread_id: result.threadId } });
                         const lastCheckpointMsg = checkpointState?.values?.messages?.slice(-1)[0];
@@ -452,10 +443,9 @@ server.post("/v1/chat/completions", async (request, reply) => {
                     emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model || "ai-it-org",
                         choices: [{ index: 0, delta: { thread_transition: { from: result.threadId, to: newThreadId, milestone: result.status, agent: result.agent } }, finish_reason: null }] });
 
-                    // Flush Langfuse for the completed thread segment
-                    const prevLfHandler = config.callbacks?.find(c => c instanceof CallbackHandler);
-                    if (prevLfHandler) {
-                        try { await prevLfHandler.flushAsync(); } catch {}
+                    // Flush Langfuse scores for the completed thread segment
+                    if (langfuseClient) {
+                        try { await langfuseClient.flush(); } catch {}
                     }
 
                     // Create new Langfuse handler for the spawned thread, same session as root
@@ -464,9 +454,8 @@ server.post("/v1/chat/completions", async (request, reply) => {
                         newConfig.callbacks = [new CallbackHandler({
                             sessionId: rootThreadId, // Same session for the whole chain
                             userId: "user",
-                            publicKey: process.env.LANGFUSE_PUBLIC_KEY,
-                            secretKey: process.env.LANGFUSE_SECRET_KEY,
-                            baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST
+                            tags: ["ai-it", "chat"],
+                            traceMetadata: { thread_id: newThreadId, root_thread_id: rootThreadId }
                         })];
                     }
 
@@ -496,26 +485,9 @@ server.post("/v1/chat/completions", async (request, reply) => {
                 researchEvents.off("prompt", onResearchPrompt);
                 researchEvents.off("chunk", onResearchChunk);
                 researchEvents.off("stop", onResearchStop);
-                // Flush Langfuse for the final thread segment
-                const lfHandler = config.callbacks?.find(c => c instanceof CallbackHandler);
-                if (lfHandler) {
-                    try {
-                        await lfHandler.flushAsync();
-                        const traceId = lfHandler.traceId;
-                        if (traceId) {
-                            const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
-                            lf.trace({
-                                id: traceId,
-                                name: directivePreview,
-                                sessionId: threadId,
-                                input: originalDirective,
-                                output: job.error ? { error: job.error } : { status: "completed" },
-                                tags: ["ai-it", "chat"],
-                                metadata: { thread_id: threadId, directive: originalDirective }
-                            });
-                            await lf.flushAsync();
-                        }
-                    } catch (e) { console.error("[LANGFUSE] Flush error:", e.message); }
+                // Flush Langfuse scores
+                if (langfuseClient) {
+                    try { await langfuseClient.flush(); } catch (e) { console.error("[LANGFUSE] Flush error:", e.message); }
                 }
                 job.done = true; activeThreads.delete(threadId); activeThreads.delete(currentThreadId); delete activeThreadAgents[threadId]; delete threadAbortControllers[threadId]; delete threadPauseRequested[threadId]; clearInterval(staleGuard);
                 setTimeout(() => { delete workflowJobs[threadId]; }, 300000);
@@ -634,6 +606,50 @@ server.get("/api/threads/:threadId/workflow", async (request, reply) => {
     } catch {
         db?.close();
         return { workflow: "workflow" };
+    }
+});
+
+server.get("/api/threads/:threadId", async (request, reply) => {
+    const threadId = request.params.threadId;
+    const db = getCheckpointDB();
+    if (!db) return reply.code(404).send({ error: "Database not found" });
+
+    try {
+        const rootId = getRootThread(threadId);
+        
+        // Try thread_titles first
+        try { db.exec("CREATE TABLE IF NOT EXISTS thread_titles (thread_id TEXT PRIMARY KEY, title TEXT NOT NULL)"); } catch {}
+        try { db.exec("ALTER TABLE thread_titles ADD COLUMN created_at INTEGER"); } catch {}
+        
+        const titleRow = db.prepare("SELECT title, created_at FROM thread_titles WHERE thread_id = ?").get(rootId);
+        
+        // If not in thread_titles, try first checkpoint of root
+        let directive = "(empty)";
+        let created_at = titleRow?.created_at || null;
+        
+        const firstRow = db.prepare("SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id ASC LIMIT 1").get(rootId);
+        if (firstRow) {
+            const firstCp = JSON.parse(firstRow.checkpoint);
+            const msgs = firstCp.channel_values?.messages || [];
+            const firstMsgRaw = msgs[0]?.kwargs?.content || "(empty)";
+            directive = typeof firstMsgRaw === 'string' ? firstMsgRaw : JSON.stringify(firstMsgRaw);
+            if (!created_at && firstCp.ts) {
+                created_at = Math.floor(new Date(firstCp.ts).getTime() / 1000);
+            }
+        }
+
+        db.close();
+        return {
+            thread_id: threadId,
+            root_id: rootId,
+            title: titleRow?.title || (directive !== "(empty)" ? directive.slice(0, 80) : threadId),
+            directive,
+            created_at
+        };
+    } catch (e) {
+        db.close();
+        console.error("[API] Error fetching thread metadata:", e.message);
+        return reply.code(500).send({ error: e.message });
     }
 });
 
@@ -800,36 +816,36 @@ function parseCheckpointMessages(rawMsgs, threadId) {
         });
 
         // Inject synthetic milestone boundaries based on status transitions
-        // When an assistant message emits a spawn milestone status, insert a boundary after it
-        const milestoneStatuses = new Set(THREAD_SPAWN_MILESTONES);
         const result = [];
         for (let i = 0; i < withRatings.length; i++) {
             const m = withRatings[i];
             result.push(m);
             if (m.type === "boundary") continue; // Already a real boundary
             if (m.role === "assistant" && m.name && !m._isPromptOriginal) {
-                const statusMatches = (m.content || "").match(/STATUS:\s*([A-Z_]+)/g);
-                if (statusMatches) {
-                    const lastStatus = statusMatches[statusMatches.length - 1].replace("STATUS: ", "").replace("STATUS:", "").trim();
-                    if (milestoneStatuses.has(lastStatus) && i < withRatings.length - 1) {
+                const statusMatches = (m.content || "").match(/(?:^|[^A-Z_])STATUS:\s*([A-Z_]+)/g) || [];
+                const agentStatusMatches = (m.content || "").match(/([A-Z_]+)_STATUS:\s*([A-Z_]+)/g) || [];
+                if (statusMatches.length > 0 || agentStatusMatches.length > 0) {
+                    let lastStatus = null;
+                    if (statusMatches.length > 0) {
+                        const mMatch = statusMatches[statusMatches.length - 1].match(/STATUS:\s*([A-Z_]+)/);
+                        if (mMatch) lastStatus = mMatch[1];
+                    } else if (agentStatusMatches.length > 0) {
+                        const mMatch = agentStatusMatches[agentStatusMatches.length - 1].match(/_STATUS:\s*([A-Z_]+)/);
+                        if (mMatch) lastStatus = mMatch[1];
+                    }
+                    if (lastStatus) {
                         // Skip if a real boundary already follows (chain mode)
                         const nextNonPrompt = withRatings.slice(i + 1).find(n => n.type === "boundary" || (n.role === "assistant" && n.name && !n._isPromptOriginal));
                         if (nextNonPrompt && nextNonPrompt.type === "boundary") continue;
-                        // Check that subsequent messages involve a different agent (assistant response OR system prompt to a different agent)
-                        const nextDifferent = withRatings.slice(i + 1).find(n =>
-                            (n.role === "assistant" && n.name && !n._isPromptOriginal && n.name !== m.name) ||
-                            (n._isPromptOriginal && n.name && n.name !== m.name)
-                        );
-                        if (nextDifferent) {
-                            result.push({
-                                role: "system", name: "__boundary__", type: "boundary",
-                                content: `── ${lastStatus} ──`,
-                                milestoneStatus: lastStatus, milestoneAgent: m.name,
-                                timestamp: m.timestamp, rating: 0,
-                                // Rewind target: the milestone message itself (rewinding to it re-triggers fan-out routing)
-                                _threadId: m._threadId, _threadMsgIndex: m._threadMsgIndex ?? m._origIndex,
-                            });
-                        }
+                        
+                        result.push({
+                            role: "system", name: "__boundary__", type: "boundary",
+                            content: `── ${lastStatus} ──`,
+                            milestoneStatus: lastStatus, milestoneAgent: m.name,
+                            timestamp: m.timestamp, rating: 0,
+                            // Rewind target: the milestone message itself (rewinding to it re-triggers fan-out routing)
+                            _threadId: m._threadId, _threadMsgIndex: m._threadMsgIndex ?? m._origIndex,
+                        });
                     }
                 }
             }
@@ -902,19 +918,16 @@ server.post("/api/threads/:threadId/messages/:messageIndex/score", async (reques
     db.close();
 
     // Send to Langfuse — look up latest trace for this session
-    if (process.env.LANGFUSE_SECRET_KEY) {
+    if (langfuseClient) {
         try {
-            const authHeader = "Basic " + Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
-            const baseUrl = process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST;
-            const traceRes = await fetch(`${baseUrl}/api/public/traces?sessionId=${encodeURIComponent(threadId)}&limit=1`, { headers: { Authorization: authHeader } });
-            const traceData = await traceRes.json();
-            const traceId = traceData.data?.[0]?.id;
+            const rootId = getRootThread(threadId);
+            const traces = await langfuseClient.api.trace.list({ sessionId: rootId, limit: 1 });
+            const traceId = traces.data?.[0]?.id;
             if (traceId) {
-                const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl });
-                lf.score({ traceId, name: "user_rating", value: rating, comment: agentName || "", metadata: { agent: agentName, messageIndex: idx } });
-                await lf.flushAsync();
+                langfuseClient.score.create({ traceId, name: "user_rating", value: rating, comment: agentName || "", metadata: { agent: agentName, messageIndex: idx } });
+                await langfuseClient.flush();
             } else {
-                console.error(`[LANGFUSE] No trace found for session ${threadId}, score not sent`);
+                console.error(`[LANGFUSE] No trace found for session ${rootId} (root of ${threadId}), score not sent`);
             }
         } catch (e) { console.error("[LANGFUSE] User rating score error:", e.message); }
     }
@@ -1317,9 +1330,8 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
             cfg.callbacks = [new CallbackHandler({
                 sessionId: threadId,
                 userId: "user",
-                publicKey: process.env.LANGFUSE_PUBLIC_KEY,
-                secretKey: process.env.LANGFUSE_SECRET_KEY,
-                baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST
+                tags: ["ai-it", "rewind"],
+                traceMetadata: { thread_id: threadId, rewind_from: rewindName, directive: rewindDirective }
             })];
         }
 
@@ -1335,7 +1347,8 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
 
         let lastTokenTime = Date.now();
         const activeAgentSet = new Set(), agentStats = {};
-        const syncActiveAgent = () => { activeThreadAgents[threadId] = { agents: [...activeAgentSet] }; };
+        let currentThreadId = threadId;
+        const syncActiveAgent = () => { activeThreadAgents[currentThreadId] = { agents: [...activeAgentSet] }; };
 
         const emit = (d) => { 
             lastTokenTime = Date.now();
@@ -1361,13 +1374,19 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         researchEvents.on("chunk", onResearchChunk);
         researchEvents.on("stop", onResearchStop);
 
-        const staleGuard = setInterval(() => { 
+        let staleGuard = setInterval(() => { 
             if (Date.now() - lastTokenTime > 600000) { 
-                console.error(`[STALE] Aborting rewound thread ${threadId}`);
+                console.error(`[STALE] Aborting rewound thread ${threadId} (no tokens for 10m)`);
                 newAbortController.abort(); 
                 clearInterval(staleGuard); 
+                staleGuard = null; 
             } 
         }, 10000);
+        
+        // Clear staleGuard on abort
+        newAbortController.signal.addEventListener('abort', () => {
+            if (staleGuard) { clearInterval(staleGuard); staleGuard = null; }
+        });
 
         // Reuse the same stream processing pattern as the main handler, with spawn support
         async function rewindStreamLoop(currentThreadId, initialMessages, streamConfig) {
@@ -1439,10 +1458,11 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                                 const scoreValue = scoreMap[status] ?? 0.5;
                                 try {
                                     const lfHandler = streamConfig.callbacks?.find(c => c instanceof CallbackHandler);
-                                    const traceId = lfHandler?.traceId;
-                                    const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
-                                    lf.score({ traceId, name: "qe_approval", value: scoreValue, comment: `STATUS: ${status}`, metadata: { agent: "quality_engineer", status } });
-                                    await lf.flushAsync();
+                                    const traceId = lfHandler?.last_trace_id;
+                                    if (langfuseClient && traceId) {
+                                        langfuseClient.score.create({ traceId, name: "qe_approval", value: scoreValue, comment: `STATUS: ${status}`, metadata: { agent: "quality_engineer", status } });
+                                        await langfuseClient.flush();
+                                    }
                                 } catch (e) { console.error("[LANGFUSE] QE score error:", e.message); }
                             }
                             // Track clarification rounds for all agents
@@ -1454,10 +1474,11 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                                 const rounds = agentRoundCounters[agentName] || 0;
                                 try {
                                     const lfHandler = streamConfig.callbacks?.find(c => c instanceof CallbackHandler);
-                                    const traceId = lfHandler?.traceId;
-                                    const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
-                                    lf.score({ traceId, name: "clarification_rounds", value: rounds, comment: rounds === 0 ? "No clarification needed" : `${rounds} round(s) before ${status}`, metadata: { agent: agentName, finalStatus: status } });
-                                    await lf.flushAsync();
+                                    const traceId = lfHandler?.last_trace_id;
+                                    if (langfuseClient && traceId) {
+                                        langfuseClient.score.create({ traceId, name: "clarification_rounds", value: rounds, comment: rounds === 0 ? "No clarification needed" : `${rounds} round(s) before ${status}`, metadata: { agent: agentName, finalStatus: status } });
+                                        await langfuseClient.flush();
+                                    }
                                     console.error(`[LANGFUSE] ${agentName} clarification_rounds: ${rounds} for thread ${currentThreadId}`);
                                 } catch (e) { console.error("[LANGFUSE] clarification score error:", e.message); }
                             }
@@ -1493,9 +1514,10 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
         }
 
         (async () => {
-            let currentThreadId = threadId;
             const rootThreadId = getRootThread(threadId);
+            console.error(`[REWIND] Starting async workflow IIFE for thread ${threadId}`);
             try {
+                console.error(`[REWIND] Calling app.streamEvents for ${truncatedMsgs.length} messages`);
                 let result = await rewindStreamLoop(currentThreadId, truncatedMsgs, cfg);
 
                 // Spawn loop — same as main handler
@@ -1507,7 +1529,7 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                     const seedMessages = [
                         new HumanMessage({ content: rewindDirective, additional_kwargs: { timestamp: Date.now() } })
                     ];
-                    // For per-agent approvals, include the individual design outputs as context
+                    // Include the milestone output(s) as context for the new thread
                     try {
                         const checkpointState = await app.getState({ configurable: { thread_id: result.threadId } });
                         const lastCheckpointMsg = checkpointState?.values?.messages?.slice(-1)[0];
@@ -1528,17 +1550,15 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                     emit({ id: requestId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: "ai-it-org",
                         choices: [{ index: 0, delta: { thread_transition: { from: result.threadId, to: newThreadId, milestone: result.status, agent: result.agent } }, finish_reason: null }] });
 
-                    const prevLfHandler = cfg.callbacks?.find(c => c instanceof CallbackHandler);
-                    if (prevLfHandler) { try { await prevLfHandler.flushAsync(); } catch {} }
+                    if (langfuseClient) { try { await langfuseClient.flush(); } catch {} }
 
                     const newCfg = { configurable: { thread_id: newThreadId, root_thread_id: rootThreadId }, recursionLimit: 100 };
                     if (process.env.LANGFUSE_SECRET_KEY || process.env.LANGFUSE_PUBLIC_KEY) {
                         newCfg.callbacks = [new CallbackHandler({
                             sessionId: rootThreadId,
                             userId: "user",
-                            publicKey: process.env.LANGFUSE_PUBLIC_KEY,
-                            secretKey: process.env.LANGFUSE_SECRET_KEY,
-                            baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST
+                            tags: ["ai-it", "rewind"],
+                            traceMetadata: { thread_id: newThreadId, root_thread_id: rootThreadId }
                         })];
                     }
 
@@ -1567,25 +1587,8 @@ server.post("/api/threads/:threadId/rewind", async (request, reply) => {
                 researchEvents.off("prompt", onResearchPrompt);
                 researchEvents.off("chunk", onResearchChunk);
                 researchEvents.off("stop", onResearchStop);
-                const lfHandler = cfg.callbacks?.find(c => c instanceof CallbackHandler);
-                if (lfHandler) {
-                    try {
-                        await lfHandler.flushAsync();
-                        const traceId = lfHandler.traceId;
-                        if (traceId) {
-                            const lf = new Langfuse({ publicKey: process.env.LANGFUSE_PUBLIC_KEY, secretKey: process.env.LANGFUSE_SECRET_KEY, baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST });
-                            lf.trace({
-                                id: traceId,
-                                name: rewindPreview,
-                                sessionId: threadId,
-                                input: rewindDirective,
-                                output: job.error ? { error: job.error } : { status: "completed" },
-                                tags: ["ai-it", "rewind"],
-                                metadata: { thread_id: threadId, rewind_from: rewindName, directive: rewindDirective }
-                            });
-                            await lf.flushAsync();
-                        }
-                    } catch (e) { console.error("[LANGFUSE] Flush error:", e.message); }
+                if (langfuseClient) {
+                    try { await langfuseClient.flush(); } catch (e) { console.error("[LANGFUSE] Flush error:", e.message); }
                 }
                 job.done = true; activeThreads.delete(threadId); activeThreads.delete(currentThreadId); delete activeThreadAgents[threadId]; delete threadAbortControllers[threadId]; delete threadPauseRequested[threadId]; clearInterval(staleGuard);
                 setTimeout(() => { delete workflowJobs[threadId]; }, 300000);

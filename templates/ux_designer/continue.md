@@ -12,7 +12,7 @@ Please continue exactly where you left off. DO NOT repeat what you have already 
 **Reminder:** NEVER output ASCII art, box-drawing characters, or visual wireframes using text characters. Describe all visuals in words. Include Flux.dev image generation prompts for key screens.
 
 ## Exit
-When the design is done, you MUST end with: "STATUS: DESIGN_COMPLETE".
+When the design is done, you MUST end with: "STATUS: DESIGN_DRAFTED".
 
 ## Interim
 If you need to stop early, end with: "STATUS: UXD_PHASE_CONTINUE".

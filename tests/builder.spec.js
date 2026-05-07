@@ -11,7 +11,7 @@ test.describe('Workflow Builder', () => {
       entry: 'business_analyst',
       milestones: [
         { id: 'initiation', name: 'Project Initiation', statuses: ['DIRECTIVE_CLEAR', 'DIRECTIVE_AMBIGUOUS'], previous: null, next: 'requirements' },
-        { id: 'requirements', name: 'Requirements Definition', statuses: ['REQUIREMENTS_CLEAR', 'REQUIREMENTS_DRAFTED'], previous: 'initiation', next: null }
+        { id: 'requirements', name: 'Requirements Definition', statuses: ['REQUIREMENTS_DRAFTED', 'REQUIREMENTS_CLEAR', 'REQUIREMENTS_AMBIGUOUS'], previous: 'initiation', next: null }
       ]
     },
     agents: {

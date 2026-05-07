@@ -42,8 +42,13 @@ function statusColor(status) {
 }
 
 function extractStatus(content) {
-  const matches = [...(content || "").matchAll(/STATUS:\s*([A-Z_]+)/g)];
+  const matches = [...(content || "").matchAll(/(?:^|[^A-Z_])STATUS:\s*([A-Z_]+)/g)];
   return matches.length ? matches[matches.length - 1][1] : "";
+}
+
+function extractAgentStatuses(content) {
+  const matches = [...(content || "").matchAll(/([A-Z_]+)_STATUS:\s*([A-Z_]+)/g)];
+  return matches.map(m => ({ agent: m[1], status: m[2] }));
 }
 
 // ── Thread List ──────────────────────────────────────────────────────────────
@@ -320,6 +325,9 @@ const ThreadDetail = {
                 <v-chip v-if="msgStatus(m)" :color="statusColor(msgStatus(m))" size="x-small" variant="tonal" class="ml-2">
                   {{ msgStatus(m) }}
                 </v-chip>
+                <v-chip v-for="st in extractAgentStatuses(m.content)" :key="st.agent" :color="statusColor(st.status)" size="x-small" variant="tonal" class="ml-2">
+                  {{ st.agent }}: {{ st.status }}
+                </v-chip>
               </div>
               <div class="d-flex align-center ga-1">
                 <template v-if="m.role === 'assistant' && m.name">
@@ -442,7 +450,16 @@ const ThreadDetail = {
   `,
   setup() {
     const route = useRoute();
-    const threadId = route.params.id;
+    const threadId = ref(route.params.id);
+
+    watch(() => route.params.id, (newId) => {
+      if (newId && newId !== threadId.value) {
+        threadId.value = newId;
+        fetchTitle();
+        fetchChain();
+        pollAll();
+      }
+    });
     const messages = ref([]);
     const loading = ref(true);
     const active = ref(false);
@@ -495,11 +512,10 @@ const ThreadDetail = {
 
     async function fetchTitle() {
       try {
-        const r = await fetch("/api/threads");
+        const r = await fetch("/api/threads/" + threadId.value);
         if (r.ok) {
-          const threads = await r.json();
-          const t = threads.find(th => th.thread_id === threadId);
-          if (t) threadTitle.value = t.title || "";
+          const t = await r.json();
+          threadTitle.value = t.title || "";
         }
       } catch {}
     }
@@ -507,7 +523,7 @@ const ThreadDetail = {
     async function fetchMessages() {
       if (isStreaming) return; // Don't clobber state while streaming
       try {
-        const r = await fetch("/api/threads/" + threadId + "/messages?chain=true");
+        const r = await fetch("/api/threads/" + threadId.value + "/messages?chain=true");
         if (r.ok) {
           const msgs = await r.json();
           // Build new array from checkpoint, reusing existing reactive objects where possible
@@ -557,7 +573,7 @@ const ThreadDetail = {
       try {
         const r = await fetch("/api/active");
         const items = await r.json();
-        const entry = items.find(i => i.thread_id === threadId);
+        const entry = items.find(i => i.thread_id === threadId.value);
         active.value = !!entry;
         activeAgents.value = entry?.agents || [];
       } catch {}
@@ -565,7 +581,7 @@ const ThreadDetail = {
 
     async function fetchChain() {
       try {
-        const r = await fetch("/api/threads/" + threadId + "/chain");
+        const r = await fetch("/api/threads/" + threadId.value + "/chain");
         if (r.ok) threadChain.value = await r.json();
       } catch {}
     }
@@ -618,48 +634,7 @@ const ThreadDetail = {
 
     const milestoneSections = computed(() => {
       const milestones = workflowMilestones.value || [];
-      if (!milestones.length) {
-        const rawSections = [];
-        const boundaries = [];
-        let current = { messages: [], active: false };
-        rawSections.push(current);
-        for (const m of messages.value) {
-          if (m.type === "boundary") {
-            boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent, _threadId: m._threadId, _threadMsgIndex: m._threadMsgIndex });
-            current = { messages: [], active: false };
-            rawSections.push(current);
-          } else {
-            current.messages.push(m);
-          }
-        }
-        const sections = rawSections.map((s, i) => {
-          const thisNextBoundary = i < boundaries.length ? boundaries[i] : null;
-          const prevBoundary = i > 0 ? boundaries[i - 1] : null;
-          const agent = thisNextBoundary ? (thisNextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
-          const rewindTarget = prevBoundary && prevBoundary._threadMsgIndex != null ? { threadId: prevBoundary._threadId || threadId, msgIndex: prevBoundary._threadMsgIndex } : null;
-          return { ...s, label: deriveSectionLabel(s, thisNextBoundary), agent, rewindTarget };
-        });
-        const labelCounts = {};
-        sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
-        const labelCounters = {};
-        sections.forEach(s => {
-          if (labelCounts[s.label] > 1) {
-            labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
-            s.label = s.label + " (Round " + labelCounters[s.label] + ")";
-          }
-        });
-        if (sections.length && active.value) {
-          sections[sections.length - 1].active = true;
-        }
-        sections.forEach(s => {
-          if (s.messages.some(m => m._streaming)) s.active = true;
-        });
-        if (sections.length !== prevSectionCount) {
-          Object.keys(sectionOverrides).forEach(k => delete sectionOverrides[k]);
-          prevSectionCount = sections.length;
-        }
-        return sections;
-      }
+      if (!milestones.length) return [];
 
       const sectionsMap = new Map();
       const sections = milestones.map(m => {
@@ -668,33 +643,66 @@ const ThreadDetail = {
         return s;
       });
 
-      let currentMilestoneIndex = 0;
+      const rawGroups = [];
+      let currentGroup = [];
       for (const m of messages.value) {
+        currentGroup.push(m);
         if (m.type === "boundary") {
-          const mIdx = milestones.findIndex(ms => ms.statuses && ms.statuses.includes(m.milestoneStatus));
-          if (mIdx !== -1) {
-            currentMilestoneIndex = mIdx;
-          }
-          if (mIdx !== -1 && mIdx + 1 < milestones.length) {
-            currentMilestoneIndex = mIdx + 1;
-            if (m._threadMsgIndex != null) {
-              sections[currentMilestoneIndex].rewindTarget = { threadId: m._threadId || threadId, msgIndex: m._threadMsgIndex };
-            }
-          }
-        } else {
-          sections[currentMilestoneIndex].messages.push(m);
-          if (m.role === "assistant" && m.name) {
-            sections[currentMilestoneIndex].agent = m.name;
-          }
+          rawGroups.push(currentGroup);
+          currentGroup = [];
         }
       }
+      if (currentGroup.length) rawGroups.push(currentGroup);
 
-      if (active.value) {
-        sections[currentMilestoneIndex].active = true;
+      const ADVANCING_STATUSES = ['DIRECTIVE_CLEAR', 'REQUIREMENTS_CLEAR', 'DESIGNS_APPROVED', 'DESIGN_APPROVED', 'IMPLEMENTATION_APPROVED', 'IMPLEMENTATION_CLEAR', 'TESTING_CLEAR'];
+      let lastKnownMIdx = 0;
+      let nextDefaultMIdx = 0;
+      
+      for (const group of rawGroups) {
+        if (!group.length) continue;
+        
+        lastKnownMIdx = nextDefaultMIdx;
+        
+        let foundStatus = null;
+        for (let i = group.length - 1; i >= 0; i--) {
+           const m = group[i];
+           if (m.type === "boundary") {
+               foundStatus = m.milestoneStatus;
+               break;
+           }
+           if (m.role === "assistant" && m.content) {
+               foundStatus = extractStatus(m.content);
+               if (!foundStatus) {
+                   const agentStatuses = extractAgentStatuses(m.content);
+                   if (agentStatuses.length) foundStatus = agentStatuses[0].status;
+               }
+               if (foundStatus) break;
+           }
+        }
+
+        if (foundStatus) {
+            const mIdx = milestones.findIndex(ms => ms.statuses && ms.statuses.includes(foundStatus));
+            if (mIdx !== -1) {
+                lastKnownMIdx = mIdx;
+                if (ADVANCING_STATUSES.includes(foundStatus) && mIdx + 1 < milestones.length) {
+                    nextDefaultMIdx = mIdx + 1;
+                } else {
+                    nextDefaultMIdx = mIdx;
+                }
+            }
+        }
+        
+        sections[lastKnownMIdx].messages.push(...group.filter(m => m.type !== "boundary"));
+        const boundary = group.find(m => m.type === "boundary");
+        if (boundary && boundary._threadMsgIndex != null && lastKnownMIdx > 0) {
+            sections[lastKnownMIdx].rewindTarget = { threadId: boundary._threadId || threadId.value, msgIndex: boundary._threadMsgIndex };
+        }
+        const asst = group.find(m => m.role === "assistant" && m.name);
+        if (asst) sections[lastKnownMIdx].agent = asst.name;
       }
-      sections.forEach(s => {
-        if (s.messages.some(m => m._streaming)) s.active = true;
-      });
+
+      if (active.value) sections[lastKnownMIdx].active = true;
+      sections.forEach(s => { if (s.messages.some(m => m._streaming)) s.active = true; });
 
       if (sections.length !== prevSectionCount) {
         Object.keys(sectionOverrides).forEach(k => delete sectionOverrides[k]);
@@ -736,7 +744,7 @@ const ThreadDetail = {
       // _threadMsgIndex: set by chain mode (original index in source thread)
       // _origIndex: set by parseCheckpointMessages (original index before synthetic boundary injection)
       const idx = m?._threadMsgIndex ?? m?._origIndex ?? i;
-      return { threadId: m?._threadId || threadId, msgIndex: idx };
+      return { threadId: m?._threadId || threadId.value, msgIndex: idx };
     }
 
     async function saveEdit() {
@@ -750,17 +758,19 @@ const ThreadDetail = {
       if (d.error) alert(d.error);
       editDialogOpen.value = false;
       // Navigate to the target thread if different from current view
-      if (tid !== threadId) router.push("/admin/thread/" + tid);
+      if (tid !== threadId.value) router.push("/admin/thread/" + tid);
       else {
+        // Set active state immediately
+        active.value = true;
         // Stop any existing stream
         if (currentStreamController) { currentStreamController.abort(); currentStreamController = null; }
         isStreaming = false;
         clearTimeout(streamRetryTimer);
-        // Reload messages (checkpoint was truncated) and check active status
+        // Reload messages (checkpoint was truncated)
         await fetchMessages();
-        await fetchActive();
-        // Connect stream if workflow is running
-        if (active.value) connectStream();
+        await fetchTitle();
+        // Always connect stream - it will wait for the backend to be ready
+        connectStream();
       }
     }
 
@@ -776,17 +786,19 @@ const ThreadDetail = {
         if (d.error) alert(d.error);
         else console.log("Rewind success:", d.message);
         // Navigate to the target thread if different from current view
-        if (tid !== threadId) router.push("/admin/thread/" + tid);
+        if (tid !== threadId.value) router.push("/admin/thread/" + tid);
         else {
+          // Set active state immediately and connect stream
+          active.value = true;
           // Stop any existing stream
           if (currentStreamController) { currentStreamController.abort(); currentStreamController = null; }
           isStreaming = false;
           clearTimeout(streamRetryTimer);
-          // Reload messages (checkpoint was truncated) and check active status
+          // Reload messages (checkpoint was truncated)
           await fetchMessages();
-          await fetchActive();
-          // Connect stream if workflow is running
-          if (active.value) connectStream();
+          await fetchTitle();
+          // Always connect stream - it will wait for the backend to be ready
+          connectStream();
         }
       } catch (e) {
         alert("Rewind failed: " + e.message);
@@ -803,17 +815,19 @@ const ThreadDetail = {
         });
         const d = await r.json();
         if (d.error) alert(d.error);
-        if (target.threadId !== threadId) router.push("/admin/thread/" + target.threadId);
+        if (target.threadId !== threadId.value) router.push("/admin/thread/" + target.threadId);
         else {
+          // Set active state immediately
+          active.value = true;
           // Stop any existing stream
           if (currentStreamController) { currentStreamController.abort(); currentStreamController = null; }
           isStreaming = false;
           clearTimeout(streamRetryTimer);
-          // Reload messages (checkpoint was truncated) and check active status
+          // Reload messages (checkpoint was truncated)
           await fetchMessages();
-          await fetchActive();
-          // Connect stream if workflow is running
-          if (active.value) connectStream();
+          await fetchTitle();
+          // Always connect stream - it will wait for the backend to be ready
+          connectStream();
         }
       } catch (e) { alert("Rewind failed: " + e.message); }
     }
@@ -863,7 +877,7 @@ const ThreadDetail = {
     async function resumeThread() {
       try {
         pausing.value = false;
-        const r = await fetch("/api/threads/" + threadId + "/resume", {
+        const r = await fetch("/api/threads/" + threadId.value + "/resume", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: "{}"
         });
@@ -877,7 +891,7 @@ const ThreadDetail = {
 
     async function pauseThread() {
       try {
-        const r = await fetch("/api/threads/" + threadId + "/pause", { method: "POST" });
+        const r = await fetch("/api/threads/" + threadId.value + "/pause", { method: "POST" });
         const d = await r.json();
         if (d.error) { alert(d.error); return; }
         pausing.value = true;
@@ -894,7 +908,7 @@ const ThreadDetail = {
     async function abortThread() {
       if (!confirm("Abort active workflow?")) return;
       if (currentStreamController) currentStreamController.abort();
-      const r = await fetch("/api/threads/" + threadId + "/abort", { method: "POST" });
+      const r = await fetch("/api/threads/" + threadId.value + "/abort", { method: "POST" });
       const d = await r.json();
       alert(d.message || d.error);
       pausing.value = false;
@@ -928,6 +942,29 @@ const ThreadDetail = {
     function processStreamDelta(deltaObj, choiceObj, created) {
       const agentId = deltaObj.agent || "";
       const eventTime = created ? new Date(created * 1000) : new Date();
+      
+      // Thread transition: navigate to new thread and reset state
+      if (deltaObj.thread_transition) {
+        const tt = deltaObj.thread_transition;
+        console.log(`[THREAD] Transition: ${tt.from} → ${tt.to} (${tt.milestone} by ${tt.agent})`);
+        // Stop current stream
+        if (currentStreamController) { currentStreamController.abort(); currentStreamController = null; }
+        isStreaming = false;
+        clearTimeout(streamRetryTimer);
+        // Navigate to new thread
+        threadId.value = tt.to;
+        router.push("/admin/thread/" + threadId.value);
+        // Update title display immediately
+        fetchTitle();
+        // Insert boundary marker for the transition
+        messages.value.push(reactive({
+          role: "system", name: "__boundary__", type: "boundary",
+          content: `── Thread transition: ${tt.milestone} ──`,
+          milestoneStatus: tt.milestone || "", milestoneAgent: tt.agent || "",
+          _msgOpen: false, _timestamp: eventTime
+        }));
+        return;
+      }
       
       if (deltaObj.system_prompt) {
         if (activeStreamStates[agentId]) {
@@ -1030,7 +1067,7 @@ const ThreadDetail = {
       const signal = currentStreamController.signal;
 
       try {
-        const resp = await fetch("/api/threads/" + threadId + "/stream", { signal });
+        const resp = await fetch("/api/threads/" + threadId.value + "/stream", { signal });
         if (!resp.ok) {
           isStreaming = false;
           // Stream not available yet (404 = no active workflow). Retry if thread is active.
@@ -1097,7 +1134,7 @@ const ThreadDetail = {
       if (currentStreamController) currentStreamController.abort();
     });
 
-    return { threadId, threadTitle, threadChain, messages, loading, active, activeAgents, pausing, msgEmoji, msgStatus, emoji, agentName, statusColor, renderMd, rewind, rewindSection, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, visualizerOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage, milestoneSections, isSectionOpen, toggleSection, msgIndex };
+    return { threadId, threadTitle, threadChain, messages, loading, active, activeAgents, pausing, msgEmoji, msgStatus, extractAgentStatuses, emoji, agentName, statusColor, renderMd, rewind, rewindSection, cloneAt, resumeThread, pauseThread, abortThread, allExpanded, toggleAllMessages, editDialogOpen, visualizerOpen, editContent, openEdit, saveEdit, copyToClipboard, toggleMessage, rateMessage, milestoneSections, isSectionOpen, toggleSection, msgIndex };
   }
 };
 

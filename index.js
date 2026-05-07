@@ -13,14 +13,8 @@ import { resolveTarget } from "./src/config/routing.js";
 import { searchDDG, fetchPageWithMeta } from "./tools/web-search/tools.js";
 import { initRagDB, storeArticle, queryChunks } from "./src/utils/rag.js";
 import { EventEmitter } from "events";
-import { Langfuse } from "langfuse";
-import { CallbackHandler } from "langfuse-langchain";
-
-const langfuse = new Langfuse({
-  publicKey: process.env.LANGFUSE_PUBLIC_KEY,
-  secretKey: process.env.LANGFUSE_SECRET_KEY,
-  baseUrl: process.env.LANGFUSE_BASE_URL || process.env.LANGFUSE_HOST
-});
+import { CallbackHandler } from "@langfuse/langchain";
+import { startObservation } from "@langfuse/tracing";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -108,21 +102,19 @@ const imageGenerationTools = [
 async function executeToolCall(call, ctx, nodeConfig) {
     const emit = (data) => { if (ctx) researchEvents.emit("tool", { ...data, threadId: ctx.threadId, agent: ctx.agent }); };
 
-    // Langfuse tracing — create span within the existing trace using the Langfuse client directly
+    // Langfuse tracing — create OTEL span for tool execution
     const callbacks = nodeConfig?.callbacks;
     const handlers = Array.isArray(callbacks) ? callbacks : callbacks?.handlers || [];
     const lfHandler = handlers.find(c => c instanceof CallbackHandler);
     let span = null;
+    const traceId = lfHandler?.last_trace_id;
 
-    if (lfHandler?.traceId) {
-        const lf = lfHandler.langfuse || langfuse;
-        span = lf.span({
-            traceId: lfHandler.traceId,
-            parentObservationId: ctx?.parentRunId,
-            name: `tool_${call.name}`,
-            input: call.args,
-            metadata: { agent: ctx?.agent }
-        });
+    if (traceId) {
+        try {
+            span = startObservation(`tool_${call.name}`, { input: call.args, metadata: { agent: ctx?.agent } }, {
+                parentSpanContext: { traceId, spanId: "0000000000000000", traceFlags: 1 }
+            });
+        } catch {}
     }
 
     try {
@@ -131,7 +123,7 @@ async function executeToolCall(call, ctx, nodeConfig) {
             const results = await searchDDG(call.args.query, 5);
             const mapped = results.map(r => ({ title: r.title, url: r.url, snippet: r.snippet }));
             emit({ type: "search", status: "complete", query: call.args.query, results: mapped });
-            if (span) span.end({ output: mapped });
+            if (span) span.update({ output: mapped }).end();
             return JSON.stringify(mapped);
         }
         if (call.name === "fetch_page") {
@@ -140,7 +132,7 @@ async function executeToolCall(call, ctx, nodeConfig) {
             emit({ type: "fetch", status: "running", url: call.args.url, domain, favicon: domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32` : "" });
             const meta = await fetchPageWithMeta(call.args.url);
             emit({ type: "fetch", status: "complete", url: call.args.url, domain, title: meta.title, favicon: meta.favicon });
-            if (span) span.end({ output: { title: meta.title, url: call.args.url, textLength: meta.text?.length } });
+            if (span) span.update({ output: { title: meta.title, url: call.args.url, textLength: meta.text?.length } }).end();
             return meta.text;
         }
         if (call.name === "generate_image_mockup") {
@@ -152,13 +144,14 @@ async function executeToolCall(call, ctx, nodeConfig) {
                 const result = startAsyncMockup(
                     call.args.prompt,
                     call.args.aspect_ratio || "9:16",
-                    call.args.screen_name || "UI Mockup"
+                    call.args.screen_name || "UI Mockup",
+                    ctx?.threadId
                 );
 
                 emit({ type: "image_gen", status: "complete", screen: result.screenName, url: result.url });
-                if (span) span.end({ output: { url: result.url, dimensions: `${result.width}x${result.height}` } });
+                if (span) span.update({ output: { url: result.url, dimensions: `${result.width}x${result.height}` } }).end();
 
-                return `✅ Image generation started in the background.\n**Screen**: ${result.screenName}\n**Dimensions**: ${result.width}x${result.height}\n**URL**: ${result.url}\n\nMarkdown: ![${result.screenName}](${result.url})`;
+                return `✅ Image generation queued in the background.\n**Screen**: ${result.screenName}\n**Dimensions**: ${result.width}x${result.height}\n**URL**: ${result.url}\n\nMarkdown: ![${result.screenName}](${result.url})`;
             } catch (err) {
                 console.error(`[TOOL ERROR] ${err.message}`);
                 throw err;
@@ -167,10 +160,10 @@ async function executeToolCall(call, ctx, nodeConfig) {
     } catch (err) {
         const toolType = call.name === "web_search" ? "search" : call.name === "fetch_page" ? "fetch" : "image_gen";
         emit({ type: toolType, status: "error", error: err.message });
-        if (span) span.end({ level: "ERROR", statusMessage: err.message });
+        if (span) { try { span.update({ level: "ERROR", statusMessage: err.message }).end(); } catch {} }
         return `Error: ${err.message}`;
     }
-    if (span) span.end({ output: "Unknown tool" });
+    if (span) { try { span.update({ output: "Unknown tool" }).end(); } catch {} }
     return "Unknown tool";
 }
 
@@ -289,22 +282,24 @@ async function runResearch(llm, messages, ctx, nodeConfig) {
     const ragChunks = await queryChunks(sessionId, directive, 12);
 
     // Log RAG retrieval to Langfuse
-    const callbacks = nodeConfig?.callbacks;
-    const handlers = Array.isArray(callbacks) ? callbacks : callbacks?.handlers || [];
-    const lfHandler = handlers.find(c => c instanceof CallbackHandler);
-    if (lfHandler?.traceId) {
-        const lf = lfHandler.langfuse || langfuse;
-        const p2scores = ragChunks.map(c => c.score);
-        const p2uniqueSources = new Set(ragChunks.map(c => c.url)).size;
-        lf.span({
-            traceId: lfHandler.traceId,
-            name: "rag_query_phase2",
-            input: { query: directive.slice(0, 500), sessionId, topK: 12 },
-            metadata: { agent: phase1AgentName, storedChunks: storedCount },
-        }).end({
-            output: ragChunks.map(c => ({ url: c.url, title: c.title, score: c.score, content: c.content.slice(0, 200) + "..." })),
-            metadata: { resultCount: ragChunks.length, avgScore: +(p2scores.reduce((a, b) => a + b, 0) / p2scores.length).toFixed(4), minScore: +Math.min(...p2scores).toFixed(4), uniqueSources: p2uniqueSources }
-        });
+    const ragCallbacks = nodeConfig?.callbacks;
+    const ragHandlers = Array.isArray(ragCallbacks) ? ragCallbacks : ragCallbacks?.handlers || [];
+    const ragLfHandler = ragHandlers.find(c => c instanceof CallbackHandler);
+    const ragTraceId = ragLfHandler?.last_trace_id;
+    if (ragTraceId) {
+        try {
+            const p2scores = ragChunks.map(c => c.score);
+            const p2uniqueSources = new Set(ragChunks.map(c => c.url)).size;
+            startObservation("rag_query_phase2", {
+                input: { query: directive.slice(0, 500), sessionId, topK: 12 },
+                metadata: { agent: phase1AgentName, storedChunks: storedCount },
+            }, {
+                parentSpanContext: { traceId: ragTraceId, spanId: "0000000000000000", traceFlags: 1 }
+            }).update({
+                output: ragChunks.map(c => ({ url: c.url, title: c.title, score: c.score, content: c.content.slice(0, 200) + "..." })),
+                metadata: { resultCount: ragChunks.length, avgScore: +(p2scores.reduce((a, b) => a + b, 0) / p2scores.length).toFixed(4), minScore: +Math.min(...p2scores).toFixed(4), uniqueSources: p2uniqueSources }
+            }).end();
+        } catch {}
     }
 
     if (ragChunks.length === 0) return "";
@@ -368,7 +363,7 @@ function extractAgentStatuses(content) {
 
 // Milestones that trigger spawning a new thread — context resets at these boundaries
 const THREAD_SPAWN_MILESTONES = [
-    "REQUIREMENTS_DRAFTED",    // BA done → fan out to SA + UX
+    "REQUIREMENTS_CLEAR",      // SA/UX done clarifying → fan out to design (or keep going in new thread)
     "DESIGNS_APPROVED",        // BA approved both designs (per-agent) → fan out to BE + FE
     "DESIGN_APPROVED",         // SA/UX approved → fan out to BE + FE
     "IMPLEMENTATION_APPROVED"  // BE/FE approved → go to QE
@@ -488,13 +483,13 @@ function getPromptForNode(state, nodeName) {
     const values = {
         // Core context
         directive: effectiveDirective,
-        upstream: otherLastContent,
-        self: selfLastContent,
-        input: otherLastContent,
+        upstream: "",
+        self: "",
+        input: "",
 
         // Interaction / clarification history — per-agent override or pipeline default
         hasClarifications: rounds.length > 0,
-        clarificationHistory,
+        clarificationHistory: [],
         clarificationRound: rounds.length,
         nextRoundNumber: rounds.length + 1,
         maxClarificationRounds: agent?.maxClarificationRounds || getPipeline().maxClarificationRounds || 5,
@@ -502,7 +497,7 @@ function getPromptForNode(state, nodeName) {
         clarificationsExhausted: rounds.length >= (agent?.maxClarificationRounds || getPipeline().maxClarificationRounds || 5),
 
         // Per-agent outputs
-        last,
+        last: {},
 
         // Status metadata
         lastStatus: extractStatus(getMsgContent(lastMsg)) || "",
@@ -591,29 +586,10 @@ Use the available tools to search the web and fetch pages.
 DO NOT draft the final response or requirements yet. Gather as much useful information as possible using the tools.
 When you are done researching, or if no research is needed, simply stop calling tools.${researchFocus}`;
 
-    // When receiving feedback from a parallel sync group, include ALL member messages
-    const parentGroup = syncGroups.find(g => g.parent === nodeName);
-    let researchUserContent;
-    if (parentGroup) {
-        const memberFeedback = [];
-        for (const member of parentGroup.members) {
-            const memberMsgs = validMsgs.filter(m => getMsgName(m) === member);
-            if (memberMsgs.length) {
-                const latest = memberMsgs[memberMsgs.length - 1];
-                memberFeedback.push(`[FEEDBACK FROM ${member}]:\n${cleanSpecialistOutput(getMsgContent(latest))}`);
-            }
-        }
-        if (memberFeedback.length > 1) {
-            researchUserContent = `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n${memberFeedback.join("\n\n")}`;
-        }
-    }
-    if (!researchUserContent) {
-        researchUserContent = `[ORIGINAL DIRECTIVE]:\n${directiveMsg}\n\n[LATEST UPDATE FROM ${getMsgName(lastMsg) || lastMsg.role || "USER"}]:\n${lastMsgContent}`;
-    }
-
     let messagesToPass = [
         { role: "system", content: researchPrompt },
-        { role: "user", content: researchUserContent }
+        ...validMsgs,
+        { role: "user", content: "Please conduct your research phase based on the conversation above. Use the web search tools to gather useful information." }
     ];
 
     console.error(`[AGENT] ${nodeName}: running web research phase`);
@@ -665,8 +641,8 @@ async function agentNode(nodeName, state, nodeConfig) {
     let accumulated = "";
 
     // Filter out __prompt for context building (research messages are kept for downstream visibility)
-    const validStateMsgs = state.messages.filter(m => !getMsgName(m).endsWith("__prompt") && getMsgName(m) !== nodeName);
-    const validLastMsg = validStateMsgs.length ? validStateMsgs[validStateMsgs.length - 1] : state.messages[0];
+    const validMsgs = state.messages.filter(m => !getMsgName(m).endsWith("__prompt") && !getMsgName(m).endsWith("__research"));
+    const validLastMsg = validMsgs.length ? validMsgs[validMsgs.length - 1] : state.messages[0];
 
     // Find if there was research generated for THIS turn
     const researchMsgs = state.messages.filter(m => getMsgName(m) === `${nodeName}__research`);
@@ -682,8 +658,16 @@ async function agentNode(nodeName, state, nodeConfig) {
     let directiveToPass = cleanSpecialistOutput(directiveMsg);
 
     let userContent = "Proceed with the task described in your system prompt.";
+    const agentSpoke = validMsgs.some(m => getMsgName(m) === nodeName && m.role === "assistant");
+    if (agentSpoke) {
+        userContent = `This is a revision round. Your previous output in the chat history is your baseline — **keep it intact**. Only make the **minimum changes** necessary to address feedback directed specifically at your role. Ignore feedback directed at other specialists. Do NOT rewrite or restructure sections that were not flagged. Output your full updated work with the targeted fixes applied.`;
+        if (nodeName === "ux_designer") {
+            userContent += `\n\nIMPORTANT: Do NOT call the \`generate_image_mockup\` tool for screens that have not changed visually. Instead, reuse the exact Markdown image links (\`![Screen Name](URL)\`) from your previous design.`;
+        }
+    }
+
     if (researchText) {
-        userContent = researchText;
+        userContent += `\n\n[RESEARCH FINDINGS]:\n${researchText}`;
     }
 
     // RAG: inject relevant research context from the vector DB for all agents
@@ -701,19 +685,21 @@ async function agentNode(nodeName, state, nodeConfig) {
             const agentCallbacks = nodeConfig?.callbacks;
             const agentHandlers = Array.isArray(agentCallbacks) ? agentCallbacks : agentCallbacks?.handlers || [];
             const agentLfHandler = agentHandlers.find(c => c instanceof CallbackHandler);
-            if (agentLfHandler?.traceId) {
-                const lf = agentLfHandler.langfuse || langfuse;
-                const scores = ragChunks.map(c => c.score);
-                const uniqueSources = new Set(ragChunks.map(c => c.url)).size;
-                lf.span({
-                    traceId: agentLfHandler.traceId,
-                    name: `rag_query_${nodeName}`,
-                    input: { query: ragQuery.slice(0, 500), threadId, topK: 6 },
-                    metadata: { agent: nodeName },
-                }).end({
-                    output: ragChunks.map(c => ({ url: c.url, title: c.title, score: c.score, content: c.content.slice(0, 200) + "..." })),
-                    metadata: { resultCount: ragChunks.length, avgScore: +(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4), minScore: +Math.min(...scores).toFixed(4), uniqueSources }
-                });
+            const agentTraceId = agentLfHandler?.last_trace_id;
+            if (agentTraceId) {
+                try {
+                    const scores = ragChunks.map(c => c.score);
+                    const uniqueSources = new Set(ragChunks.map(c => c.url)).size;
+                    startObservation(`rag_query_${nodeName}`, {
+                        input: { query: ragQuery.slice(0, 500), threadId, topK: 6 },
+                        metadata: { agent: nodeName },
+                    }, {
+                        parentSpanContext: { traceId: agentTraceId, spanId: "0000000000000000", traceFlags: 1 }
+                    }).update({
+                        output: ragChunks.map(c => ({ url: c.url, title: c.title, score: c.score, content: c.content.slice(0, 200) + "..." })),
+                        metadata: { resultCount: ragChunks.length, avgScore: +(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(4), minScore: +Math.min(...scores).toFixed(4), uniqueSources }
+                    }).end();
+                } catch {}
             }
         }
     } catch (err) {
@@ -725,23 +711,25 @@ async function agentNode(nodeName, state, nodeConfig) {
         const roundCallbacks = nodeConfig?.callbacks;
         const roundHandlers = Array.isArray(roundCallbacks) ? roundCallbacks : roundCallbacks?.handlers || [];
         const roundLfHandler = roundHandlers.find(c => c instanceof CallbackHandler);
-        if (roundLfHandler?.traceId) {
-            const lf = roundLfHandler.langfuse || langfuse;
-            lf.span({
-                traceId: roundLfHandler.traceId,
-                name: `agent_turn_${nodeName}`,
+        const roundTraceId = roundLfHandler?.last_trace_id;
+        if (roundTraceId) {
+            startObservation(`agent_turn_${nodeName}`, {
                 metadata: { agent: nodeName, clarificationRound, maxClarificationRounds, useTools },
+            }, {
+                parentSpanContext: { traceId: roundTraceId, spanId: "0000000000000000", traceFlags: 1 }
             }).end();
         }
     } catch {}
 
     let messagesToPass = [
         { role: "system", content: systemPromptStr },
+        ...validMsgs,
         { role: "user", content: userContent }
     ];
 
-    const totalChars = systemPromptStr.length + userContent.length;
-    process.stderr.write(`[CONTEXT] ${nodeName}: system=${systemPromptStr.length.toLocaleString()} + user=${userContent.length.toLocaleString()} = ${totalChars.toLocaleString()} chars total\n`);
+    const validMsgsChars = validMsgs.reduce((acc, m) => acc + getMsgContent(m).length, 0);
+    const totalChars = systemPromptStr.length + userContent.length + validMsgsChars;
+    process.stderr.write(`[CONTEXT] ${nodeName}: system=${systemPromptStr.length.toLocaleString()} + history=${validMsgsChars.toLocaleString()} + user=${userContent.length.toLocaleString()} = ${totalChars.toLocaleString()} chars total\n`);
 
     // Bind image generation tools for UX designer during main generation
     let llmWithTools = llm;
@@ -816,6 +804,8 @@ async function agentNode(nodeName, state, nodeConfig) {
                         }
                     }
                     if (spawnContext.length) kwargs.spawnContext = spawnContext;
+                } else {
+                    kwargs.spawnContext = [{ name: nodeName, content: cleanSpecialistOutput(accumulated) }];
                 }
             }
             return { messages: [new AIMessage({ content: accumulated, name: nodeName, additional_kwargs: kwargs })] };
@@ -833,6 +823,7 @@ async function agentNode(nodeName, state, nodeConfig) {
         // Use Assistant Prefill pattern: the model continues from the last assistant message.
         messagesToPass = [
             { role: "system", content: systemPromptStr },
+            ...validMsgs,
             { role: "user", content: userContent },
             { role: "assistant", content: accumulated }
         ];
@@ -936,15 +927,16 @@ function buildRouteFunction(agentId) {
         }
 
         const target = routingDef.routes[status];
-        if (target === undefined) return fallbackRouter(state, agentId);
-
-        const resolved = resolveTarget(target, agentId, state);
 
         // Spawn milestone: route to END so the server can spawn a new thread
         if (THREAD_SPAWN_MILESTONES.includes(status)) {
-            console.log(`[ROUTER]: Spawn milestone ${status} from ${agentId} → END (server will spawn new thread targeting ${JSON.stringify(resolved)})`);
+            console.log(`[ROUTER]: Spawn milestone ${status} from ${agentId} → END (server will spawn new thread)`);
             return [END];
         }
+
+        if (target === undefined) return fallbackRouter(state, agentId);
+
+        const resolved = resolveTarget(target, agentId, state);
 
         // If it routes to itself, let it loop without syncing.
         if (resolved.length === 1 && resolved[0] === agentId) {

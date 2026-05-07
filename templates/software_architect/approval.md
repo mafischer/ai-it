@@ -10,10 +10,10 @@ Review Engineer's implementation.
 Provide feedback on the implementation ONLY IF it does not meet the design.
 
 ## Feedback
-If implementation is unsatisfactory, say "STATUS: DESIGN_SATISFIED" and route back to Engineer.
+If implementation is unsatisfactory, say "STATUS: IMPLEMENTATION_AMBIGUOUS" and route back to Engineer.
 
 ## Approval
-If implementation is good, end with: "STATUS: DESIGN_APPROVED".
+If implementation is good, end with: "STATUS: IMPLEMENTATION_APPROVED".
 
 ## Implementation
 {{input}}

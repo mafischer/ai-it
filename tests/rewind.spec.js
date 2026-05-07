@@ -21,7 +21,9 @@ test.describe('Rewind Functionality', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ pipeline: { entry: 'business_analyst', milestones: [] }, agents: {}, routing: {} })
+        body: JSON.stringify({ pipeline: { entry: 'business_analyst', milestones: [
+          { id: 'inception', name: 'Project Inception', statuses: ['DIRECTIVE_CLEAR', 'DIRECTIVE_AMBIGUOUS'], previous: null, next: null }
+        ] }, agents: {}, routing: {} })
       });
     });
 

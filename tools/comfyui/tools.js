@@ -50,16 +50,45 @@ function parseFluxPrompt(promptText) {
 }
 
 // Build ComfyUI workflow from prompt
-function buildWorkflow(prompt, width, height) {
+function buildWorkflow(prompt, width, height, refs = []) {
   const template = JSON.parse(readFileSync(join(__dirname, "..", "..", "flux_api.json"), "utf8"));
   
   // Update prompts
-  template["6"].inputs.clip_l = prompt;
-  template["6"].inputs.t5xxl = prompt;
+  template["6"].inputs.text = prompt;
   
   // Update dimensions on latent image node
   template["27"].inputs.width = width;
   template["27"].inputs.height = height;
+
+  if (refs && refs.length > 0) {
+    let lastCondNode = "7";
+    for (let i = 0; i < refs.length; i++) {
+      const loadImageId = `${100 + i * 3}`;
+      const vaeEncodeId = `${100 + i * 3 + 1}`;
+      const refLatentId = `${100 + i * 3 + 2}`;
+
+      template[loadImageId] = {
+        class_type: "LoadImage",
+        inputs: { image: refs[i] }
+      };
+
+      template[vaeEncodeId] = {
+        class_type: "VAEEncode",
+        inputs: { pixels: [loadImageId, 0], vae: ["5", 0] }
+      };
+
+      template[refLatentId] = {
+        class_type: "ReferenceLatent",
+        inputs: { 
+          conditioning: [lastCondNode, 0],
+          latent: [vaeEncodeId, 0] 
+        }
+      };
+
+      lastCondNode = refLatentId;
+    }
+    template["8"].inputs.positive = [lastCondNode, 0];
+  }
   
   return template;
 }
@@ -128,6 +157,13 @@ async function uploadToMinIO(buffer, filename) {
     writeFileSync(localTempPath, buffer);
     console.error(`[COMFYUI] Saved temp file: ${localTempPath}`);
     
+    // Also save to ComfyUI input directory if it exists locally so LoadImage can use it
+    const comfyInputDir = "/Users/michael/ComfyUI/input";
+    if (existsSync(comfyInputDir)) {
+      writeFileSync(join(comfyInputDir, filename), buffer);
+      console.error(`[COMFYUI] Copied to ComfyUI input directory: ${filename}`);
+    }
+
     // Create temp file on remote server and upload to MinIO
     const cmd = `ssh ${MINIO_SERVER} "cat > /tmp/comfyui_temp_${filename}" < "${localTempPath}" && \
                  ssh ${MINIO_SERVER} "mc cp /tmp/comfyui_temp_${filename} ${MINIO_ALIAS}/${MINIO_BUCKET}/${filename} && rm -f /tmp/comfyui_temp_${filename}"`;
@@ -150,8 +186,8 @@ async function uploadToMinIO(buffer, filename) {
 }
 
 // Main generation function - awaits full pipeline (submit, poll, download, upload)
-async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Unknown", providedFilename = null) {
-  console.error(`[COMFYUI] Generating mockup: "${screenName}"`);
+async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Unknown", providedFilename = null, refs = []) {
+  console.error(`[COMFYUI] Generating mockup: "${screenName}" with ${refs.length} references`);
 
   // Parse prompt text (strips --ar from text) and get base dimensions
   let { prompt, width, height } = parseFluxPrompt(promptText);
@@ -170,7 +206,7 @@ async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Un
   const resultFilename = providedFilename || `${safeName}_${Date.now()}.png`;
 
   // Build workflow
-  const workflow = buildWorkflow(prompt, width, height);
+  const workflow = buildWorkflow(prompt, width, height, refs);
 
   // Submit to ComfyUI
   const promptId = await submitToComfyUI(workflow);
@@ -197,8 +233,12 @@ async function generateMockup(promptText, aspectRatio = "9:16", screenName = "Un
   };
 }
 
+const threadQueues = {};
+const threadRecentImages = {};
+const threadLastActive = {};
+
 // Starts generation in the background and returns the proxy URL immediately
-function startAsyncMockup(promptText, aspectRatio = "9:16", screenName = "Unknown") {
+function startAsyncMockup(promptText, aspectRatio = "9:16", screenName = "Unknown", threadId = "default") {
   let { prompt, width, height } = parseFluxPrompt(promptText);
 
   if (!(promptText || "").match(/--ar\s+\d+:\d+/) && aspectRatio) {
@@ -212,9 +252,26 @@ function startAsyncMockup(promptText, aspectRatio = "9:16", screenName = "Unknow
   const resultFilename = `${safeName}_${Date.now()}.png`;
   const proxyUrl = `/api/mockups/${resultFilename}`;
 
-  // Fire and forget
-  generateMockup(promptText, aspectRatio, screenName, resultFilename).catch(err => {
-      console.error(`[COMFYUI] Async generation failed: ${err.message}`);
+  const now = Date.now();
+  // Clear the reference image queue if there's been no activity for 2 minutes
+  if (!threadLastActive[threadId] || now - threadLastActive[threadId] > 120000) {
+     threadRecentImages[threadId] = [];
+  }
+  threadLastActive[threadId] = now;
+
+  if (!threadQueues[threadId]) {
+     threadQueues[threadId] = Promise.resolve();
+  }
+
+  const currentRefs = [...threadRecentImages[threadId]];
+
+  threadQueues[threadId] = threadQueues[threadId].then(async () => {
+      try {
+          await generateMockup(promptText, aspectRatio, screenName, resultFilename, currentRefs);
+          threadRecentImages[threadId].push(resultFilename);
+      } catch (err) {
+          console.error(`[COMFYUI] Async generation failed: ${err.message}`);
+      }
   });
 
   return { url: proxyUrl, width, height, screenName: safeName };
@@ -254,15 +311,35 @@ export function registerTools(server) {
         const resultFilename = `${safeName}_${Date.now()}.png`;
         const proxyUrl = `/api/mockups/${resultFilename}`;
 
-        // Fire and forget
-        generateMockup(prompt, aspect_ratio, screen_name, resultFilename).catch(err => {
-            console.error(`[COMFYUI] Async generation failed: ${err.message}`);
+        // Fire and forget - using 'mcp' as threadId since we don't have access to ctx here
+        // Note: For actual LangGraph integration, this is intercepted by index.js before hitting MCP
+        // but keeping it here for standalone testing.
+        const mcpThreadId = "mcp";
+        const now = Date.now();
+        if (!threadLastActive[mcpThreadId] || now - threadLastActive[mcpThreadId] > 120000) {
+           threadRecentImages[mcpThreadId] = [];
+        }
+        threadLastActive[mcpThreadId] = now;
+        
+        if (!threadQueues[mcpThreadId]) {
+           threadQueues[mcpThreadId] = Promise.resolve();
+        }
+        
+        const currentRefs = [...threadRecentImages[mcpThreadId]];
+        
+        threadQueues[mcpThreadId] = threadQueues[mcpThreadId].then(async () => {
+            try {
+                await generateMockup(prompt, aspect_ratio, screen_name, resultFilename, currentRefs);
+                threadRecentImages[mcpThreadId].push(resultFilename);
+            } catch (err) {
+                console.error(`[COMFYUI] Async generation failed: ${err.message}`);
+            }
         });
 
         return {
           content: [{
             type: "text",
-            text: `Image generation started in the background.\n**Screen:** ${screen_name}\n**Dimensions:** ${width}x${height}\n**URL:** ${proxyUrl}\n\nMarkdown: ![${screen_name}](${proxyUrl})`
+            text: `Image generation queued in the background.\n**Screen:** ${screen_name}\n**Dimensions:** ${width}x${height}\n**URL:** ${proxyUrl}\n\nMarkdown: ![${screen_name}](${proxyUrl})`
           }]
         };
       } catch (err) {

@@ -11,8 +11,13 @@ const EMOJIS = {
 };
 
 function extractStatus(content) {
-  const matches = [...(content || "").matchAll(/STATUS:\s*([A-Z_]+)/g)];
+  const matches = [...(content || "").matchAll(/(?:^|[^A-Z_])STATUS:\s*([A-Z_]+)/g)];
   return matches.length ? matches[matches.length - 1][1] : "";
+}
+
+function extractAgentStatuses(content) {
+  const matches = [...(content || "").matchAll(/([A-Z_]+)_STATUS:\s*([A-Z_]+)/g)];
+  return matches.map(m => ({ agent: m[1], status: m[2] }));
 }
 
 function statusColor(status) {
@@ -221,6 +226,9 @@ const ChatView = {
                       <v-progress-circular v-if="m._streaming" indeterminate size="12" width="1.5" color="primary"></v-progress-circular>
                       <v-chip v-if="extractStatus(m.content)" :color="statusColor(extractStatus(m.content))" size="x-small" variant="tonal" class="ml-2">
                         {{ extractStatus(m.content) }}
+                      </v-chip>
+                      <v-chip v-for="st in extractAgentStatuses(m.content)" :key="st.agent" :color="statusColor(st.status)" size="x-small" variant="tonal" class="ml-2">
+                        {{ st.agent }}: {{ st.status }}
                       </v-chip>
                     </div>
                     <div class="d-flex align-center ga-1">
@@ -433,46 +441,7 @@ const ChatView = {
 
     const milestoneSections = computed(() => {
       const milestones = workflowMilestones.value || [];
-      if (!milestones.length) {
-        const rawSections = [];
-        const boundaries = [];
-        let current = { messages: [], active: false };
-        rawSections.push(current);
-        for (const m of messages.value) {
-          if (m.type === "boundary") {
-            boundaries.push({ milestoneStatus: m.milestoneStatus, milestoneAgent: m.milestoneAgent });
-            current = { messages: [], active: false };
-            rawSections.push(current);
-          } else {
-            current.messages.push(m);
-          }
-        }
-        const sections = rawSections.map((s, i) => {
-          const thisNextBoundary = i < boundaries.length ? boundaries[i] : null;
-          const agent = thisNextBoundary ? (thisNextBoundary.milestoneAgent || "") : (s.messages.find(m => m.role === "assistant" && m.name)?.name || "");
-          return { ...s, label: deriveSectionLabel(s, thisNextBoundary), agent };
-        });
-        const labelCounts = {};
-        sections.forEach(s => { labelCounts[s.label] = (labelCounts[s.label] || 0) + 1; });
-        const labelCounters = {};
-        sections.forEach(s => {
-          if (labelCounts[s.label] > 1) {
-            labelCounters[s.label] = (labelCounters[s.label] || 0) + 1;
-            s.label = s.label + " (Round " + labelCounters[s.label] + ")";
-          }
-        });
-        if (sections.length && streaming.value) {
-          sections[sections.length - 1].active = true;
-        }
-        sections.forEach(s => {
-          if (s.messages.some(m => m._streaming)) s.active = true;
-        });
-        if (sections.length !== chatPrevSectionCount) {
-          Object.keys(chatSectionOverrides).forEach(k => delete chatSectionOverrides[k]);
-          chatPrevSectionCount = sections.length;
-        }
-        return sections;
-      }
+      if (!milestones.length) return [];
 
       const sectionsMap = new Map();
       const sections = milestones.map(m => {
@@ -481,26 +450,66 @@ const ChatView = {
         return s;
       });
 
-      let currentMilestoneIndex = 0;
+      const rawGroups = [];
+      let currentGroup = [];
       for (const m of messages.value) {
+        currentGroup.push(m);
         if (m.type === "boundary") {
-          const mIdx = milestones.findIndex(ms => ms.statuses && ms.statuses.includes(m.milestoneStatus));
-          if (mIdx !== -1) {
-            currentMilestoneIndex = mIdx;
-          }
-          if (mIdx !== -1 && mIdx + 1 < milestones.length) {
-            currentMilestoneIndex = mIdx + 1;
-          }
-        } else {
-          sections[currentMilestoneIndex].messages.push(m);
-          if (m.role === "assistant" && m.name) {
-            sections[currentMilestoneIndex].agent = m.name;
-          }
+          rawGroups.push(currentGroup);
+          currentGroup = [];
         }
+      }
+      if (currentGroup.length) rawGroups.push(currentGroup);
+
+      const ADVANCING_STATUSES = ['DIRECTIVE_CLEAR', 'REQUIREMENTS_CLEAR', 'DESIGNS_APPROVED', 'DESIGN_APPROVED', 'IMPLEMENTATION_APPROVED', 'IMPLEMENTATION_CLEAR', 'TESTING_CLEAR'];
+      let lastKnownMIdx = 0;
+      let nextDefaultMIdx = 0;
+      
+      for (const group of rawGroups) {
+        if (!group.length) continue;
+        
+        lastKnownMIdx = nextDefaultMIdx;
+        
+        let foundStatus = null;
+        for (let i = group.length - 1; i >= 0; i--) {
+           const m = group[i];
+           if (m.type === "boundary") {
+               foundStatus = m.milestoneStatus;
+               break;
+           }
+           if (m.role === "assistant" && m.content) {
+               foundStatus = extractStatus(m.content);
+               if (!foundStatus) {
+                   const agentStatuses = extractAgentStatuses(m.content);
+                   if (agentStatuses.length) foundStatus = agentStatuses[0].status;
+               }
+               if (foundStatus) break;
+           }
+        }
+
+        if (foundStatus) {
+            const mIdx = milestones.findIndex(ms => ms.statuses && ms.statuses.includes(foundStatus));
+            if (mIdx !== -1) {
+                lastKnownMIdx = mIdx;
+                if (ADVANCING_STATUSES.includes(foundStatus) && mIdx + 1 < milestones.length) {
+                    nextDefaultMIdx = mIdx + 1;
+                } else {
+                    nextDefaultMIdx = mIdx;
+                }
+            }
+        }
+
+        sections[lastKnownMIdx].messages.push(...group.filter(m => m.type !== "boundary"));
+        const boundary = group.find(m => m.type === "boundary");
+        if (boundary && boundary._threadMsgIndex != null && lastKnownMIdx > 0) {
+            sections[lastKnownMIdx].rewindTarget = { threadId: boundary._threadId || threadId, msgIndex: boundary._threadMsgIndex };
+        }
+        const asst = group.find(m => m.role === "assistant" && m.name);
+        if (asst) sections[lastKnownMIdx].agent = asst.name;
       }
 
       if (streaming.value) {
-        sections[currentMilestoneIndex].active = true;
+        sections[lastKnownMIdx].active = true;
       }
       sections.forEach(s => {
         if (s.messages.some(m => m._streaming)) s.active = true;
@@ -993,7 +1002,7 @@ const ChatView = {
     });
     onUnmounted(() => { clearInterval(pollInterval); clearInterval(nowInterval); if (currentStreamController) currentStreamController.abort(); });
 
-    return { drawer, rail, input, workflows, selectedWorkflow, threads, activeThreadIds, currentThreadId, messages, displayMessages, streaming, pausing, messagesContainer, getEmoji, agentDisplayName, extractStatus, statusColor, formatTime, formatThinkDuration, timeAgo, renderMd, fetchThreads, selectThread, deleteThread, stopThread, exportThread, startNewChat, send, resumeThread, pauseThread, allExpanded, toggleAllMessages, copyToClipboard, cloneAt, toggleMessage, milestoneSections, hasMilestones, isSectionOpen, toggleSection, chatMsgIndex };
+    return { drawer, rail, input, workflows, selectedWorkflow, threads, activeThreadIds, currentThreadId, messages, displayMessages, streaming, pausing, messagesContainer, getEmoji, agentDisplayName, extractStatus, extractAgentStatuses, statusColor, formatTime, formatThinkDuration, timeAgo, renderMd, fetchThreads, selectThread, deleteThread, stopThread, exportThread, startNewChat, send, resumeThread, pauseThread, allExpanded, toggleAllMessages, copyToClipboard, cloneAt, toggleMessage, milestoneSections, hasMilestones, isSectionOpen, toggleSection, chatMsgIndex };
   }
 };
 

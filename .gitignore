@@ -21,6 +21,15 @@ test-results/
 
 # debugging
 test-*.js
+test_workflow.json
+dump_*.cjs
+fetch_*.cjs
+find_*.cjs
+update_*.cjs
+all_obs.json
+cp.json
+msgs.json
+msgs_meta.json
 
 # MacOS
 .DS_Store

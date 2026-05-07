@@ -10,10 +10,10 @@ Review Frontend Engineer's implementation against your design.
 Provide feedback on the implementation ONLY IF it does not match your design.
 
 ## Feedback
-If implementation does not match design, provide specific feedback.
+If implementation does not match design, provide specific feedback and end with "STATUS: IMPLEMENTATION_AMBIGUOUS".
 
 ## Approval
-If implementation matches design, end with: "STATUS: DESIGN_APPROVED".
+If implementation matches design, end with: "STATUS: IMPLEMENTATION_APPROVED".
 
 ## Implementation
 {{input}}

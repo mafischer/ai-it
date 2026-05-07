@@ -10,7 +10,7 @@ Your previous response hit the output length limit and was truncated.
 Please continue exactly where you left off. DO NOT repeat what you have already written, just pick up from the exact sentence or code block where you were cut off.
 
 ## Exit
-When the design is done, you MUST end with: "STATUS: DESIGN_COMPLETE".
+When the design is done, you MUST end with: "STATUS: DESIGN_DRAFTED".
 
 ## Interim
 If you need to stop early, end with: "STATUS: ARCHITECT_PHASE_CONTINUE".

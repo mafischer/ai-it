@@ -54,6 +54,8 @@ for (const ext of ["js", "cjs"]) {
             src = src.replace(/(\t|\s)+const role = delta\.role \?\? defaultRole;\n(\t|\s)+const reasoning = delta\.reasoning_content [\s\S]*?const content = \(reasoning \? [\s\S]*?\)\n/m, "");
             // Or if it was the original:
             src = src.replace(/(\t|\s)+const role = delta\.role \?\? defaultRole;\n(\t|\s)+let content;\n(\t|\s)+if \(reasoning\) [\s\S]*?else \{[\s\S]*?content = delta\.content \?\? "";[\s\S]*?\}/m, "");
+            // Or simple definition
+            src = src.replace(/(\t|\s)+const role = delta\.role \?\? defaultRole;\n(\t|\s)+const content = delta\.content \?\? "";\n/m, "");
             
             modified = true;
         }
